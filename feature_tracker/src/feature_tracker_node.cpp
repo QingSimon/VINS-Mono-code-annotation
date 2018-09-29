@@ -17,7 +17,7 @@ queue<sensor_msgs::ImageConstPtr> img_buf;
 ros::Publisher pub_img,pub_match;
 
 //每个相机都有一个FeatureTracker实例，即trackerData[i]
-FeatureTracker trackerData[NUM_OF_CAM];//数组中每一个元素都是FeatureTracker的实例
+FeatureTracker trackerData[NUM_OF_CAM];
 double first_image_time;
 int pub_count = 1;
 bool first_image_flag = true;
@@ -260,15 +260,13 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "feature_tracker");
     ros::NodeHandle n("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
-    
-    //调用parameters.cpp中定义的函数readParameters(n)，读取控制前端角点提取和跟踪的一些配置参数
     readParameters(n);
 
 
     for (int i = 0; i < NUM_OF_CAM; i++)
         trackerData[i].readIntrinsicParameter(CAM_NAMES[i]);//每个相机实例读取对应的相机内参
 
-    //鱼眼相机的mask,追踪时候会用到，用来去除边缘噪点
+    //鱼眼相机的mask,追踪时候会用到
     if(FISHEYE)
     {
         for (int i = 0; i < NUM_OF_CAM; i++)
@@ -284,20 +282,18 @@ int main(int argc, char **argv)
         }
     }
 
-    //订阅相机原始图像数据话题IMAGE_TOPIC，队列长度为100，回调函数为img_callback
     ros::Subscriber sub_img = n.subscribe(IMAGE_TOPIC, 100, img_callback);
 
-    //在名为feature的话题下发布一条类型为sensor_msgs::PointCloud的消息，队列长度为1000
+    //在名为feature的话题下发布一条类型为PointCloud的消息
     pub_img = n.advertise<sensor_msgs::PointCloud>("feature", 1000);
     
-    //在名为feature_img的话题下发布一条类型为Image的消息，队列长度为1000
+    //在名为feature_img的话题下发布一条类型为Image的消息
     pub_match = n.advertise<sensor_msgs::Image>("feature_img",1000);
 
     /*
     if (SHOW_TRACK)
         cv::namedWindow("vis", cv::WINDOW_NORMAL);
     */
-
     ros::spin();
     return 0;
 }

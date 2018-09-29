@@ -23,4 +23,4 @@ extern int EQUALIZE;//控制FeatureTracker::readImage()中，是否对读入的�
 extern int FISHEYE;
 extern bool PUB_THIS_FRAME;//控制是否发布这一帧的数据
 
-void readParameters(ros::NodeHandle &n);//供ROS节点调用，读取参数
+void readParameters(ros::NodeHandle &n);
