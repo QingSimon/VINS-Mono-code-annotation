@@ -52,7 +52,7 @@ class FeatureTracker
     vector<cv::Point2f> undistortedPoints();
 
     cv::Mat mask;
-    cv::Mat fisheye_mask;
+    cv::Mat fisheye_mask;//鱼眼mask，用来去除边缘噪点
 
     // prev_img是上一次发布的帧的图像数据
     // cur_img是光流跟踪的前一帧的图像数据

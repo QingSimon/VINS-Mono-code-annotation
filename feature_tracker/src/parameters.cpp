@@ -18,6 +18,7 @@ int FOCAL_LENGTH;
 int FISHEYE;
 bool PUB_THIS_FRAME;
 
+//定义读取参数的模板函数
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
 {
