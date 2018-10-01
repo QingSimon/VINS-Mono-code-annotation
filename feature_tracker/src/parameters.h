@@ -2,8 +2,8 @@
 #include <ros/ros.h>
 #include <opencv2/highgui/highgui.hpp>
 
-extern int ROW;//相机成像的像素行数
-extern int COL;//相机成像的像素列数
+extern int ROW;//相机成像的像素总行数
+extern int COL;//相机成像的像素总列数
 extern int FOCAL_LENGTH;//相机焦距
 const int NUM_OF_CAM = 1;//相机个数（好像可以支持双目相机）
 

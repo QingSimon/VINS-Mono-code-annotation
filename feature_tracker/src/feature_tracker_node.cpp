@@ -62,17 +62,19 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 
     cv_bridge::CvImageConstPtr ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
     cv::Mat show_img = ptr->image;
-    TicToc t_r;
+    TicToc t_r;//开始计时
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         ROS_DEBUG("processing camera %d", i);
         if (i != 1 || !STEREO_TRACK)
+            //调用FeatureTracker::readImage()函数，读取图像数据进行处理
             trackerData[i].readImage(ptr->image.rowRange(ROW * i, ROW * (i + 1)));
         else
         {
             //双目
             if (EQUALIZE)
             {
+                //如果开关EQUALIZE打开，则对读入的图像数据进行自适应直方图均衡化处理
                 cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
                 clahe->apply(ptr->image.rowRange(ROW * i, ROW * (i + 1)), trackerData[i].cur_img);
             }
@@ -162,6 +164,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         {
             if (i != 1 || !STEREO_TRACK)
             {
+                //单目
                 auto un_pts = trackerData[i].undistortedPoints();
                 auto &cur_pts = trackerData[i].cur_pts;
                 auto &ids = trackerData[i].ids;

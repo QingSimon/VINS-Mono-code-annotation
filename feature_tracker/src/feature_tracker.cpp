@@ -1,6 +1,6 @@
 #include "feature_tracker.h"
 
-int FeatureTracker::n_id = 0;
+int FeatureTracker::n_id = 0;//FeatureTracker类的static成员变量n_id初始化
 
 
  //判断跟踪的特征点是否还在图像边界内
@@ -12,9 +12,7 @@ bool inBorder(const cv::Point2f &pt)
     return BORDER_SIZE <= img_x && img_x < COL - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < ROW - BORDER_SIZE;
 }
 
-/**
- * @breif 去除无法追踪的特征
-*/
+//去除无法追踪的特征
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status)
 {
     int j = 0;
@@ -24,9 +22,7 @@ void reduceVector(vector<cv::Point2f> &v, vector<uchar> status)
     v.resize(j);
 }
 
-/**
- * 去除无法追踪到的特征点
-*/
+//去除无法追踪到的特征点
 void reduceVector(vector<int> &v, vector<uchar> status)
 {
     int j = 0;
@@ -43,7 +39,7 @@ FeatureTracker::FeatureTracker()
 }
 
 
-//对于光流跟踪到的特征点，按照被追踪到的次数排序，然后加上mask去掉部分点，主要是针对鱼眼相机
+//对于光流跟踪到的特征点，按照被追踪到的次数排序，然后加上mask去掉部分点，使特征点分布均匀
 void FeatureTracker::setMask()
 {
     if(FISHEYE)
@@ -59,7 +55,7 @@ void FeatureTracker::setMask()
     for (unsigned int i = 0; i < forw_pts.size(); i++)
         cnt_pts_id.push_back(make_pair(track_cnt[i], make_pair(forw_pts[i], ids[i])));
 
-    //对光流跟踪到的特征点，按照被跟踪到的次数从大到小排序
+    //对光流跟踪到的特征点forw_pts，按照被跟踪到的次数从大到小排序
     sort(cnt_pts_id.begin(), cnt_pts_id.end(), [](const pair<int, pair<cv::Point2f, int>> &a, const pair<int, pair<cv::Point2f, int>> &b)
          {
             return a.first > b.first;
@@ -87,9 +83,7 @@ void FeatureTracker::setMask()
 }
 
 
-/**
- * @brief 添加新的特征点
-*/
+//添将新检测到的特征点n_pts添加到forw_pts中
 void FeatureTracker::addPoints()
 {
     for (auto &p : n_pts)
@@ -119,7 +113,7 @@ void FeatureTracker::readImage(const cv::Mat &_img)
     //根据控制参数EQUALIZE判断是否进行直方图均衡化处理
     if (EQUALIZE)
     {
-        //使用createCLAHE对图像进行自适应直方图均衡化
+        //调用cv::createCLAHE对图像进行自适应直方图均衡
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
         TicToc t_c;
         clahe->apply(_img, img);
@@ -147,8 +141,8 @@ void FeatureTracker::readImage(const cv::Mat &_img)
     //此时的forw_pts实际上还保存的是上一帧图像中的特征点，所以把它清除
     forw_pts.clear();
 
-    //调用cv::calcOpticalFlowPyrLK()计算光流，对前一帧的特征点cur_pts进行跟踪，得到forw_pts
-    if (cur_pts.size() > 0)//如果if不成立，说明当前读入的是第一帧图像
+    //调用cv::calcOpticalFlowPyrLK()对前一帧的特征点cur_pts进行金字塔光流跟踪，得到forw_pts
+    if (cur_pts.size() > 0)//如果前一帧中特征点数量为0，说明当前读入的是第一帧图像
     {
         TicToc t_o;
         vector<uchar> status;
@@ -167,6 +161,7 @@ void FeatureTracker::readImage(const cv::Mat &_img)
 
         //对于无法跟踪的特征点，不仅要从当前帧数据forw_pts中剔除，而且还要从prev_pts和cur_pts中剔除
         //仔细思考一下，会发现prev_pts和cur_pts中的特征点是一一对应的
+        //此外，在记录特征点id的ids，和记录特征点被跟踪次数的track_cnt中，也要把这些跟踪失败的特征点对应位置的记录删除
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);
         reduceVector(forw_pts, status);
@@ -205,7 +200,7 @@ void FeatureTracker::readImage(const cv::Mat &_img)
             if (mask.size() != forw_img.size())
                 cout << "wrong size " << endl;
 
-            // 提取新的特征点，确保每一帧中有足够数量的特征点
+            // 调用cv::goodFeaturesToTrack()在mask中不为0的区域检测新的特征点
             // ref:https://docs.opencv.org/3.1.0/dd/d1a/group__imgproc__feature.html#ga1d6bb77486c8f92d79c8793ad995d541
             // forw_img:输入图像
             // n_pts:存放检测到的角点的vector
@@ -221,7 +216,10 @@ void FeatureTracker::readImage(const cv::Mat &_img)
 
         ROS_DEBUG("add feature begins");
         TicToc t_a;
+
+        //添将新检测到的特征点n_pts添加到forw_pts中
         addPoints();
+        
         ROS_DEBUG("selectFeature costs: %fms", t_a.toc());
 
         //由于当前帧数据需要发布，所以当下一帧图像到来时，当前帧数据就成为了上一帧发布的数据
@@ -234,9 +232,7 @@ void FeatureTracker::readImage(const cv::Mat &_img)
     cur_pts = forw_pts;
 }
 
-/**
- * @breif 通过前后两帧的追踪计算F矩阵，通过F矩阵去除Outliers
-*/
+//调用cv::findFundamentalMat对prev_pts和forw_pts计算F矩阵，通过F矩阵去除outliers
 void FeatureTracker::rejectWithF()
 {
     if (forw_pts.size() >= 8)
@@ -271,14 +267,14 @@ void FeatureTracker::rejectWithF()
     }
 }
 
-/**
- * @breif 更新ID
-*/
+
+//更新特征点id
 bool FeatureTracker::updateID(unsigned int i)
 {
     if (i < ids.size())
     {
         if (ids[i] == -1)
+            //n_id先赋给ids[i]，然后再加1
             ids[i] = n_id++;
         return true;
     }

@@ -72,5 +72,7 @@ class FeatureTracker
 
     camodocal::CameraPtr m_camera;
 
-    static int n_id;
+    //由于可能有多个相机，那么就有多个FeatureTracker的实例，而多个相机需要共享一个n_id
+    //对n_id做static修饰，可以使得n_id被FeatureTracker的多个实例对象共享
+    static int n_id;//用来作为特征点id，每检测到一个新的特征点，就将n_id作为该特征点的id，然后n_id加1
 };
