@@ -52,7 +52,7 @@ class Estimator
 
     // internal
     void clearState();
-    bool initialStructure();
+    bool initialStructure(); // 视觉结构初始化
     bool visualInitialAlign();
     bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
     void slideWindow();
@@ -86,31 +86,34 @@ class Estimator
     Matrix3d ric[NUM_OF_CAM];
     Vector3d tic[NUM_OF_CAM];
 
-    Vector3d Ps[(WINDOW_SIZE + 1)];
-    Vector3d Vs[(WINDOW_SIZE + 1)];
-    Matrix3d Rs[(WINDOW_SIZE + 1)];
-    Vector3d Bas[(WINDOW_SIZE + 1)];
-    Vector3d Bgs[(WINDOW_SIZE + 1)];
+    Vector3d Ps[(WINDOW_SIZE + 1)]; // 滑动窗口中各关键帧在前一图像帧对应IMU坐标系中的位置
+    Vector3d Vs[(WINDOW_SIZE + 1)]; // 滑动窗口中各关键帧在前一图像帧对应IMU坐标系中的速度
+    Matrix3d Rs[(WINDOW_SIZE + 1)]; // 滑动窗口中各关键帧在前一图像帧对应IMU坐标系中的旋转
+    Vector3d Bas[(WINDOW_SIZE + 1)]; // 滑动窗口中各关键帧对应时刻加速度计的偏置
+    Vector3d Bgs[(WINDOW_SIZE + 1)]; // 滑动窗口中各关键帧对应时刻陀螺仪的偏置
 
     Matrix3d back_R0, last_R, last_R0;
     Vector3d back_P0, last_P, last_P0;
     std_msgs::Header Headers[(WINDOW_SIZE + 1)];
 
-    IntegrationBase *pre_integrations[(WINDOW_SIZE + 1)];
-    Vector3d acc_0, gyr_0;
+    // 用于滑动窗口内关键帧之间IMU数据的预积分
+    // 数组大小为(WINDOW_SIZE + 1)，其中每一个元素都是IntegrationBase类型的指针
+    IntegrationBase *pre_integrations[(WINDOW_SIZE + 1)]; 
+
+    Vector3d acc_0, gyr_0; // 预积分中初始时刻（即前一图像关键帧时刻）的IMU数据
 
     vector<double> dt_buf[(WINDOW_SIZE + 1)];
     vector<Vector3d> linear_acceleration_buf[(WINDOW_SIZE + 1)];
     vector<Vector3d> angular_velocity_buf[(WINDOW_SIZE + 1)];
 
-    int frame_count;
+    int frame_count; // 目前不太确定这个变量的含义，似乎是滑动窗口中关键帧的计数
     int sum_of_outlier, sum_of_back, sum_of_front, sum_of_invalid;
 
-    FeatureManager f_manager;
-    MotionEstimator m_estimator;
+    FeatureManager f_manager; // 管理特征点的对象
+    MotionEstimator m_estimator; // 5点法恢复图像之间的相对运动
     InitialEXRotation initial_ex_rotation;
 
-    bool first_imu;
+    bool first_imu; // ture：预积分中初始时刻（即前一图像关键帧时刻）的IMU数据已确定 false： 未指定
     bool is_valid, is_key;
     bool failure_occur;
 
@@ -136,7 +139,7 @@ class Estimator
     MarginalizationInfo *last_marginalization_info;
     vector<double *> last_marginalization_parameter_blocks;
 
-    map<double, ImageFrame> all_image_frame;
+    map<double, ImageFrame> all_image_frame; // 存储所有的图像特征点数据，map中的索引值是图像时间戳
     IntegrationBase *tmp_pre_integration;
 
 };

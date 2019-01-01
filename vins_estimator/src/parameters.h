@@ -8,11 +8,11 @@
 #include <opencv2/core/eigen.hpp>
 #include <fstream>
 
-const double FOCAL_LENGTH = 460.0;
-const int WINDOW_SIZE = 10;
-const int NUM_OF_CAM = 1;
+const double FOCAL_LENGTH = 460.0; // 相机焦距
+const int WINDOW_SIZE = 10; // 滑动窗口的大小
+const int NUM_OF_CAM = 1; // 相机数量
 const int NUM_OF_F = 1000;
-const double LOOP_INFO_VALUE = 50.0;
+const double LOOP_INFO_VALUE = 50.0; // 这个变量似乎没有使用
 //#define DEPTH_PRIOR
 //#define GT
 #define UNIT_SPHERE_ERROR

@@ -2,7 +2,12 @@
 
 double INIT_DEPTH;
 double MIN_PARALLAX;
-double ACC_N, ACC_W;
+
+// ACC_N：加速度计测量噪声的标准差（N表示noise）
+// ACC_W：加速度计偏置被建模为随机游走，随机游走的标准差为ACC_W（我猜W表示walking）
+double ACC_N, ACC_W; 
+// GYR_N: 陀螺仪测量噪声的标准差
+// GYR_W：陀螺仪偏置被建模为随机游走，随机游走的标准差为GYR_W
 double GYR_N, GYR_W;
 
 std::vector<Eigen::Matrix3d> RIC;

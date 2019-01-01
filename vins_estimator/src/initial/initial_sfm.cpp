@@ -115,29 +115,49 @@ void GlobalSFM::triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Po
 //  c_translation cam_R_w
 // relative_q[i][j]  j_q_i
 // relative_t[i][j]  j_t_ji  (j < i)
+/**
+ * 输入参数说明：
+ * int frame_num： 滑动窗口中图像帧的数量，实际上就是WINDOW_SIZE + 1
+ * Quaterniond* q： 一个数组指针，数组中需要存储滑动窗口中所有帧的姿态
+ * Vector3d* T： 一个数组指针，数组中需要存储滑动窗口中所有帧的位置
+ * int l： 在滑动窗口中找到的与最新帧做5点法的帧的帧号
+ * const Matrix3d relative_R： 从最新帧到第l帧的旋转（个人推断）
+ * const Vector3d relative_T： 从最新帧到第l帧的位移（个人推断）
+ * vector<SFMFeature> &sfm_f： shenmegui???
+ * map<int, Vector3d> &sfm_tracked_points： shenmegui???
+ */
 bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 			  const Matrix3d relative_R, const Vector3d relative_T,
 			  vector<SFMFeature> &sfm_f, map<int, Vector3d> &sfm_tracked_points)
 {
 	feature_num = sfm_f.size();
 	//cout << "set 0 and " << l << " as known " << endl;
+
+
 	// have relative_r relative_t
 	// intial two view
-	//把relativePose找到的第l帧作为初始位置，最后一帧的pose为relative_R,relative_T
+	//把relativePose找到的第l帧（是字母l，不是数字1，l是在滑动窗口中找到的与最新帧做5点法的帧的帧号）作为初始位置，最后一帧的pose为relative_R,relative_T
+	// 第l帧的姿态设置为一个没有任何旋转的实单位四元数
 	q[l].w() = 1;
 	q[l].x() = 0;
 	q[l].y() = 0;
 	q[l].z() = 0;
+
+	// 第l帧位置向量设置为[0, 0, 0]
 	T[l].setZero();
+
+	// 右乘形式，说明是从从local到global的旋转
 	q[frame_num - 1] = q[l] * Quaterniond(relative_R);
 	T[frame_num - 1] = relative_T;
 	//cout << "init q_l " << q[l].w() << " " << q[l].vec().transpose() << endl;
 	//cout << "init t_l " << T[l].transpose() << endl;
 
 	//rotate to cam frame
+	// shenmegui??
 	Matrix3d c_Rotation[frame_num];
 	Vector3d c_Translation[frame_num];
 	Quaterniond c_Quat[frame_num];
+	
 	//for ceres
 	double c_rotation[frame_num][4];
 	double c_translation[frame_num][3];
@@ -159,6 +179,12 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	//1: trangulate between l ----- frame_num - 1
 	//2: solve pnp l + 1; trangulate l + 1 ------- frame_num - 1; 
 	//以frame_num - 1为参考帧，根据第l和frame_num - 1帧的R,T，三角化一些点，然后再用PNP得到l+1到frame-1之间所有相对pose，然后恢复这些3D点
+	
+	/** 
+	 * 从第l帧到第（frame_num - 2）帧，以第frame_num - 1帧为参考帧：
+	 * 先通过pnp计算第i帧（i = l + 1, ..., frame_num - 2）的位姿，第l帧的姿态已知，所以直接在下一步进行三角化
+	 * 再调用triangulateTwoFrames()三角化一些点
+	 */
 	for (int i = l; i < frame_num - 1 ; i++)
 	{
 		// solve pnp
@@ -180,11 +206,25 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	}
 	//3: triangulate l-----l+1 l+2 ... frame_num -2
 	//以l为参考帧，继续恢复3D点
+
+	/** 
+	 * 从第l + 1帧到第（frame_num - 1）帧，以第l帧为参考帧：
+	 * 第i帧（i = l + 1, ..., frame_num - 2）的位姿前面已经计算过了
+	 * 再次调用triangulateTwoFrames()三角化一些点
+	 */
 	for (int i = l + 1; i < frame_num - 1; i++)
 		triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
+
+
 	//4: solve pnp l-1; triangulate l-1 ----- l
 	//             l-2              l-2 ----- l
 	//以l为参考帧，恢复0-l的pose和3D点
+
+	/** 
+	 * 从第l - 1帧到第0帧，以第l帧为参考帧：
+	 * 先通过pnp计算第i帧（i = l - 1, ..., 0）的位姿
+	 * 再调用triangulateTwoFrames()三角化一些点
+	 */
 	for (int i = l - 1; i >= 0; i--)
 	{
 		//solve pnp
@@ -197,9 +237,12 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 		c_Quat[i] = c_Rotation[i];
 		Pose[i].block<3, 3>(0, 0) = c_Rotation[i];
 		Pose[i].block<3, 1>(0, 3) = c_Translation[i];
+
 		//triangulate
 		triangulateTwoFrames(i, Pose[i], l, Pose[l], sfm_f);
 	}
+
+	
 	//5: triangulate all other points
 	//根据以上的点，恢复其他的点
 	for (int j = 0; j < feature_num; j++)

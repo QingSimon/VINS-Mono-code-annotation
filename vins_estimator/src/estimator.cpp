@@ -38,6 +38,7 @@ void Estimator::clearState()
         pre_integrations[i] = nullptr;
     }
 
+    // IMU与camera之间的外参
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         tic[i] = Vector3d::Zero();
@@ -71,9 +72,10 @@ void Estimator::clearState()
 
 void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity)
 {
-    if (!first_imu)
+    if (!first_imu) // 未接收到第一帧IMU数据
     {
-        first_imu = true;
+        first_imu = true; // 标志着已经接收到第一帧IMU数据
+        // 指定前一时刻的加速度计和陀螺仪测量值
         acc_0 = linear_acceleration;
         gyr_0 = angular_velocity;
     }
@@ -88,7 +90,7 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
         //if(solver_flag != NON_LINEAR)
             tmp_pre_integration->push_back(dt, linear_acceleration, angular_velocity);
 
-        dt_buf[frame_count].push_back(dt);
+        dt_buf[frame_count].push_back(dt); // IMU数据的时间间隔
         linear_acceleration_buf[frame_count].push_back(linear_acceleration);
         angular_velocity_buf[frame_count].push_back(angular_velocity);
 
@@ -114,10 +116,16 @@ void Estimator::processImage(const map<int, vector<pair<int, Vector3d>>> &image,
 {
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
-    //通过检测两帧之间的视差决定是否作为关键帧，同时添加之前检测到的特征点到feature容器中，计算每一个点跟踪的次数，以及它的视差
+    
+    // 把当前帧图像（frame_count）的特征点添加到feature容器中
+    // 计算第2最新帧与第3最新帧之间的平均视差（当前帧是第1最新帧），然后判断是否把第2最新帧添加为关键帧
+    // 在未完成初始化时，是否添加关键帧的判定结果不起作用，因为在还未初始化时，滑动窗口要塞满，而且不需要做关键帧判别
+    // 只有在初始化完成之后
     if (f_manager.addFeatureCheckParallax(frame_count, image))
+        // 第2最新帧是关键帧，就将最旧的帧移出滑动窗口，在slideWindow()函数中操作
         marginalization_flag = MARGIN_OLD;
     else
+        // 第2最新帧不是关键帧，就把第2最新帧移出滑动窗口，在slideWindow()函数中操作
         marginalization_flag = MARGIN_SECOND_NEW;
 
     ROS_DEBUG("this frame is--------------------%s", marginalization_flag ? "reject" : "accept");
@@ -138,8 +146,11 @@ void Estimator::processImage(const map<int, vector<pair<int, Vector3d>>> &image,
         {
             vector<pair<Vector3d, Vector3d>> corres = f_manager.getCorresponding(frame_count - 1, frame_count);
             Matrix3d calib_ric;
+
+            // 相机与IMU坐标系旋转矩阵的在线标定
             if (initial_ex_rotation.CalibrationExRotation(corres, pre_integrations[frame_count]->delta_q, calib_ric))
             {
+                // 如果标定成功
                 ROS_WARN("initial extrinsic rotation calib success");
                 ROS_WARN_STREAM("initial extrinsic rotation: " << endl << calib_ric);
                 ric[0] = calib_ric;
@@ -154,13 +165,15 @@ void Estimator::processImage(const map<int, vector<pair<int, Vector3d>>> &image,
         if (frame_count == WINDOW_SIZE)
         {
             bool result = false;
+
+            // ????(header.stamp.toSec() - initial_timestamp) > 0.1 这个判断是什么意思？？？？
             if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
             {
-                //视觉的结构初始化
+                // vins初始化
                result = initialStructure();
                initial_timestamp = header.stamp.toSec();
             }
-            if(result)
+            if(result) // 如果vins初始化成功
             {
                 solver_flag = NON_LINEAR;
                 solveOdometry();
@@ -179,7 +192,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Vector3d>>> &image,
         else
             frame_count++;
     }
-    else
+    else // solver_flag = NON_LINEAR 说明已经完成初始化，进行非线性优化
     {
         TicToc t_solve;
         solveOdometry();
@@ -211,19 +224,22 @@ void Estimator::processImage(const map<int, vector<pair<int, Vector3d>>> &image,
     }
 }
 
-
-//视觉的结构初始化
-//1.确保IMU有足够的excitation
-//2.选择跟最后一帧中有足够多特征点和视差的某一帧，利用五点法恢复相对旋转和平移量 恢复某两帧
-//3.sfm.construct 全局SFM 恢复滑动窗口的帧的位姿
-//4. 利用pnp恢复其他帧
-//5.开始初始化，视觉IMU数据对齐
-//6.给滑动窗口中要优化的变量一个合理的初始值以便进行非线性优化
+/**
+ * vins初始化
+ * 1.确保IMU有足够的excitation
+ * 2.检查当前帧（最后一帧）与滑动窗口中所有图像帧之间的特征点匹配关系，
+ *   选择跟当前帧中有足够多数量的特征点被跟踪，且由足够视差的某一帧，利用五点法恢复相对旋转和平移量。
+ *   如果找不到，则在滑动窗口中保留当前帧，然后等待新的图像帧
+ * 3.sfm.construct 全局SFM 恢复滑动窗口的帧的位姿
+ * 4.利用pnp恢复其他帧
+ * 5.开始初始化，视觉IMU数据对齐
+ * 6.给滑动窗口中要优化的变量一个合理的初始值以便进行非线性优化
+ */
 bool Estimator::initialStructure()
 {
     TicToc t_sfm;
-    //check imu observibility
-    //1.通过重力variance确保IMU有足够的excitation
+    // check imu observibility
+    // 1.通过重力variance确保IMU有足够的excitation
     {
         map<double, ImageFrame>::iterator frame_it;
         Vector3d sum_g;
@@ -251,9 +267,11 @@ bool Estimator::initialStructure()
             //return false;
         }
     }
+
+
     // global sfm
-    Quaterniond Q[frame_count + 1];
-    Vector3d T[frame_count + 1];
+    Quaterniond Q[frame_count + 1]; // 滑动窗口中每一帧的姿态
+    Vector3d T[frame_count + 1]; // 滑动窗口中每一帧的位置
     map<int, Vector3d> sfm_tracked_points;
     
     //特征点对应的3D feature
@@ -272,23 +290,28 @@ bool Estimator::initialStructure()
         }
         sfm_f.push_back(tmp_feature);
     } 
-    Matrix3d relative_R;
-    Vector3d relative_T;
-    int l;
-    //2.选择跟最后一帧中有足够多特征点和视差的某一帧，利用五点法恢复相对旋转和平移量 
+
+    Matrix3d relative_R; // 最新帧与选定帧的旋转
+    Vector3d relative_T; // 最新帧与选定帧的平移
+    int l; // 滑动窗口中选定帧的帧号
+    // 2.选择跟最新帧中有足够数量的特征点跟踪和视差的某一帧，利用五点法恢复相对旋转和平移量 
+    // 如果找不到，则初始化失败
     if (!relativePose(relative_R, relative_T, l))
     {
         ROS_INFO("Not enough features or parallax; Move device around");
         return false;
     }
-    //3.全局SFM初始化全部初始帧中的相机位置和特征点空间3D位置 
+
+    // 3.全局SFM初始化全部初始帧中的相机位置和特征点空间3D位置 
     GlobalSFM sfm;
     if(!sfm.construct(frame_count + 1, Q, T, l,
               relative_R, relative_T,
               sfm_f, sfm_tracked_points))
     {
         ROS_DEBUG("global SFM failed!");
-        marginalization_flag = MARGIN_OLD;
+        // 纯视觉初始化失败
+        // 从滑动窗口中把最旧的帧margin掉
+        marginalization_flag = MARGIN_OLD; 
         return false;
     }
 
@@ -363,6 +386,7 @@ bool Estimator::initialStructure()
         frame_it->second.R = R_pnp * RIC[0].transpose();
         frame_it->second.T = T_pnp;
     }
+
     //camera与IMU对齐
     if (visualInitialAlign())
         return true;
@@ -463,6 +487,7 @@ bool Estimator::visualInitialAlign()
 bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
 {
     // find previous frame which contians enough correspondance and parallex with newest frame
+    // 在滑动窗口中，寻找与最新帧有足够多数量的特征点对应关系和视差的帧，然后用5点法恢复相对位姿
     for (int i = 0; i < WINDOW_SIZE; i++)
     {
         vector<pair<Vector3d, Vector3d>> corres;
@@ -482,7 +507,7 @@ bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
             average_parallax = 1.0 * sum_parallax / int(corres.size());
             if(average_parallax * 460 > 30 && m_estimator.solveRelativeRT(corres, relative_R, relative_T))
             {
-                l = i;
+                l = i; // 与当前帧获得匹配的帧的帧号
                 ROS_DEBUG("average_parallax %f choose l %d and newest frame to triangulate the whole structure", average_parallax * 460, l);
                 return true;
             }
@@ -1032,7 +1057,12 @@ void Estimator::optimization()
     ROS_DEBUG("whole time for ceres: %f", t_whole.toc());
 }
 
-//实际滑动窗口的地方，如果第二最新帧是关键帧的话，那么这个关键帧就会留在滑动窗口中，时间最长的一帧和其测量值就会被边缘化掉如果第二最新帧不是关键帧的话，则把这帧的视觉测量舍弃掉而保留IMU测量值在滑动窗口中这样的策略会保证系统的稀疏性
+/**
+ * 实际滑动窗口的地方
+ * 如果第二最新帧是关键帧的话，那么这个关键帧就会留在滑动窗口中，时间最长的一帧和其测量值就会被边缘化掉
+ * 如果第二最新帧不是关键帧的话，则把这帧的视觉测量舍弃掉而保留IMU测量值在滑动窗口中
+ * 这样的策略会保证系统的稀疏性 
+ */
 void Estimator::slideWindow()
 {
     TicToc t_margin;

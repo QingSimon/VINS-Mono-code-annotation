@@ -9,6 +9,7 @@ class Utility
 {
   public:
     template <typename Derived>
+    // 局部坐标系下的转角，转化为右乘四元数
     static Eigen::Quaternion<typename Derived::Scalar> deltaQ(const Eigen::MatrixBase<Derived> &theta)
     {
         typedef typename Derived::Scalar Scalar_t;
