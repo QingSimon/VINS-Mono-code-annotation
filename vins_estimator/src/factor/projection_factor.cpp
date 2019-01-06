@@ -6,7 +6,6 @@ double ProjectionFactor::sum_t;
 ProjectionFactor::ProjectionFactor(const Eigen::Vector3d &_pts_i, const Eigen::Vector3d &_pts_j) : pts_i(_pts_i), pts_j(_pts_j)
 {
 #ifdef UNIT_SPHERE_ERROR
-    //计算正切空间的一对正交基底
     Eigen::Vector3d b1, b2;
     Eigen::Vector3d a = pts_j.normalized();
     Eigen::Vector3d tmp(0, 0, 1);
@@ -19,7 +18,6 @@ ProjectionFactor::ProjectionFactor(const Eigen::Vector3d &_pts_i, const Eigen::V
 #endif
 };
 
-//视觉重投影的残差
 bool ProjectionFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
 {
     TicToc tic_toc;
@@ -63,8 +61,6 @@ bool ProjectionFactor::Evaluate(double const *const *parameters, double *residua
         x1 = pts_camera_j(0);
         x2 = pts_camera_j(1);
         x3 = pts_camera_j(2);
-        
-        //？？？？？这个矩阵是干嘛的？？？
         norm_jaco << 1.0 / norm - x1 * x1 / pow(norm, 3), - x1 * x2 / pow(norm, 3),            - x1 * x3 / pow(norm, 3),
                      - x1 * x2 / pow(norm, 3),            1.0 / norm - x2 * x2 / pow(norm, 3), - x2 * x3 / pow(norm, 3),
                      - x1 * x3 / pow(norm, 3),            - x2 * x3 / pow(norm, 3),            1.0 / norm - x3 * x3 / pow(norm, 3);
@@ -164,11 +160,14 @@ void ProjectionFactor::check(double **parameters)
     Eigen::Vector3d pts_imu_j = Qj.inverse() * (pts_w - Pj);
     Eigen::Vector3d pts_camera_j = qic.inverse() * (pts_imu_j - tic);
 
-    double dep_j = pts_camera_j.z();
 
     Eigen::Vector2d residual;
+#ifdef UNIT_SPHERE_ERROR 
+    residual =  tangent_base * (pts_camera_j.normalized() - pts_j.normalized());
+#else
+    double dep_j = pts_camera_j.z();
     residual = (pts_camera_j / dep_j).head<2>() - pts_j.head<2>();
-
+#endif
     residual = sqrt_info * residual;
 
     puts("num");
@@ -212,12 +211,14 @@ void ProjectionFactor::check(double **parameters)
         Eigen::Vector3d pts_imu_j = Qj.inverse() * (pts_w - Pj);
         Eigen::Vector3d pts_camera_j = qic.inverse() * (pts_imu_j - tic);
 
-        double dep_j = pts_camera_j.z();
-
         Eigen::Vector2d tmp_residual;
+#ifdef UNIT_SPHERE_ERROR 
+        tmp_residual =  tangent_base * (pts_camera_j.normalized() - pts_j.normalized());
+#else
+        double dep_j = pts_camera_j.z();
         tmp_residual = (pts_camera_j / dep_j).head<2>() - pts_j.head<2>();
+#endif
         tmp_residual = sqrt_info * tmp_residual;
-
         num_jacobian.col(k) = (tmp_residual - residual) / eps;
     }
     std::cout << num_jacobian << std::endl;

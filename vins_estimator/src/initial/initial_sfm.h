@@ -11,15 +11,12 @@
 using namespace Eigen;
 using namespace std;
 
-/**
- * 用于纯视觉SFM初始化
- */
 
 
 struct SFMFeature
 {
-    bool state; // true: 三角化成功
-    int id; // 特征点id
+    bool state;
+    int id;
     vector<pair<int,Vector2d>> observation;
     double position[3];
     double depth;

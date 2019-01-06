@@ -11,468 +11,242 @@
 #include "estimator.h"
 #include "parameters.h"
 #include "utility/visualization.h"
-#include "loop-closure/loop_closure.h"
-#include "loop-closure/keyframe.h"
-#include "loop-closure/keyframe_database.h"
-#include "camodocal/camera_models/CameraFactory.h"
-#include "camodocal/camera_models/CataCamera.h"
-#include "camodocal/camera_models/PinholeCamera.h"
+
 
 Estimator estimator;
 
-std::condition_variable con;//条件变量，与std::mutex配合使用
-double current_time = -1; // 上一次做预积分的IMU数据对应的时间戳
-queue<sensor_msgs::ImuConstPtr> imu_buf; // IMU原始数据缓存队列
-queue<sensor_msgs::PointCloudConstPtr> feature_buf; // 图像特征点数据缓存队列
-std::mutex m_posegraph_buf;
-queue<int> optimize_posegraph_buf;
-queue<KeyFrame*> keyframe_buf;
-queue<RetriveData> retrive_data_buf;
+std::condition_variable con;
+double current_time = -1;
+queue<sensor_msgs::ImuConstPtr> imu_buf;
+queue<sensor_msgs::PointCloudConstPtr> feature_buf;
+queue<sensor_msgs::PointCloudConstPtr> relo_buf;
+int sum_of_wait = 0;
 
-int sum_of_wait = 0;//这个变量没有使用
-
-std::mutex m_buf;
-std::mutex m_state;
+std::mutex m_buf; // 用于处理多个线程使用imu_buf和feature_buf的冲突
+std::mutex m_state; // 用于处理多个线程使用当前里程计信息（即tmp_P、tmp_Q、tmp_V）的冲突
 std::mutex i_buf;
-std::mutex m_loop_drift;
-std::mutex m_keyframedatabase_resample;
-std::mutex m_update_visualization;
-std::mutex m_keyframe_buf;
-std::mutex m_retrive_data_buf;
+std::mutex m_estimator; // 用于处理多个线程使用VINS系统对象（即Estimator类的实例estimator）的冲突
 
-double latest_time;  //上一次接受的IMU数据的时间戳
-Eigen::Vector3d tmp_P; // 上一帧IMU数据对应时刻，本体坐标系（IMU坐标系）相对于世界坐标系的位移
-Eigen::Quaterniond tmp_Q; // 上一帧IMU数据对应时刻，本体坐标系（IMU坐标系）相对于世界坐标系的旋转
-Eigen::Vector3d tmp_V; // 上一帧IMU数据对应时刻，本体坐标系（IMU坐标系）相对于世界坐标系的速度
-Eigen::Vector3d tmp_Ba; // 上一帧IMU数据对应时刻，加速度计偏置
-Eigen::Vector3d tmp_Bg; // 上一帧IMU数据对应时刻，陀螺仪偏置
-Eigen::Vector3d acc_0; // 上一次接收到的IMU数据，三轴线加速度IMU测量值
-Eigen::Vector3d gyr_0; // 上一次接收到的IMU数据，三轴角速度IMU测量值
+double latest_time; // 最近一次里程计信息对应的IMU时间戳
+// 当前里程计信息
+Eigen::Vector3d tmp_P;
+Eigen::Quaterniond tmp_Q;
+Eigen::Vector3d tmp_V;
 
-queue<pair<cv::Mat, double>> image_buf; // 相机原始图像数据缓存队列
-LoopClosure *loop_closure;
-KeyFrameDatabase keyframe_database; // 关键帧数据库，用于回环检测
+// 当前里程计信息对应的IMU bias
+Eigen::Vector3d tmp_Ba;
+Eigen::Vector3d tmp_Bg;
 
-int global_frame_cnt = 0;
-//camera param
-camodocal::CameraPtr m_camera;
-vector<int> erase_index;
-std_msgs::Header cur_header;
-Eigen::Vector3d relocalize_t{Eigen::Vector3d(0, 0, 0)};
-Eigen::Matrix3d relocalize_r{Eigen::Matrix3d::Identity()};
+// 当前里程计信息对应的IMU测量值
+Eigen::Vector3d acc_0;
+Eigen::Vector3d gyr_0;
+
+bool init_feature = 0;
+bool init_imu = 1; // true：第一次接收IMU数据
+double last_imu_t = 0; // 最近一帧IMU数据的时间戳
 
 
-// 通过积分计算未去除噪声的p, v, q值
-// 实际上对应着标称状态的预积分（中值积分方式），此处的参考坐标系为世界坐标系
+// 通过IMU测量值积分更新里程计信息
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
-    double t = imu_msg->header.stamp.toSec(); // 时间戳
-    double dt = t - latest_time; // 计算时间间隔
-    latest_time = t; // 更新上一次接收到的IMU数据的时间戳
+    double t = imu_msg->header.stamp.toSec();
+    if (init_imu) // 第一次接收IMU数据
+    {
+        latest_time = t;
+        init_imu = 0;
+        return;
+    }
+    double dt = t - latest_time;
+    latest_time = t;
 
-    // 三轴线加速度测量值
     double dx = imu_msg->linear_acceleration.x;
     double dy = imu_msg->linear_acceleration.y;
     double dz = imu_msg->linear_acceleration.z;
     Eigen::Vector3d linear_acceleration{dx, dy, dz};
 
-    // 三轴角速度测量值
     double rx = imu_msg->angular_velocity.x;
     double ry = imu_msg->angular_velocity.y;
     double rz = imu_msg->angular_velocity.z;
     Eigen::Vector3d angular_velocity{rx, ry, rz};
 
-    // 这一部分的内容对应着https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf里
-    // 的公式（70）、（71）和（72），有所区别的是，此处的参考坐标系为世界坐标系
-    // 标称状态的预积分（中值积分）
-
-    //去除加速度计偏置和重力的影响，并通过坐标变换得到世界坐标系下的“真实”线加速度
-    Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba - tmp_Q.inverse() * estimator.g);
+    Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - estimator.g;
 
     Eigen::Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - tmp_Bg;
-    tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt); // 当前帧本体坐标系在世界坐标系中的旋转
+    tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt);
 
-    Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba - tmp_Q.inverse() * estimator.g);
+    Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - estimator.g;
 
     Eigen::Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
 
-    tmp_P = tmp_P + dt * tmp_V + 0.5 * dt * dt * un_acc; // 当前帧本体坐标系在世界坐标系中的位移
-    tmp_V = tmp_V + dt * un_acc; // 当前帧本体坐标系在世界坐标系中的线速度
+    tmp_P = tmp_P + dt * tmp_V + 0.5 * dt * dt * un_acc;
+    tmp_V = tmp_V + dt * un_acc;
 
-    // 更新上一次接收到的IMU数据
-    acc_0 = linear_acceleration; // 三轴线加速度IMU测量值
-    gyr_0 = angular_velocity; // 三轴角速度IMU测量值
+    acc_0 = linear_acceleration;
+    gyr_0 = angular_velocity;
 }
 
+// 当处理完measurements中的所有数据后，如果VINS系统正常完成滑动窗口优化，那么需要用优化后的结果更新里程计数据
 void update()
 {
     TicToc t_predict;
     latest_time = current_time;
-    tmp_P = relocalize_r * estimator.Ps[WINDOW_SIZE] + relocalize_t;
-    tmp_Q = relocalize_r * estimator.Rs[WINDOW_SIZE];
+
+    // 首先获取滑动窗口中最新帧的P、V、Q
+    tmp_P = estimator.Ps[WINDOW_SIZE];
+    tmp_Q = estimator.Rs[WINDOW_SIZE];
     tmp_V = estimator.Vs[WINDOW_SIZE];
     tmp_Ba = estimator.Bas[WINDOW_SIZE];
     tmp_Bg = estimator.Bgs[WINDOW_SIZE];
     acc_0 = estimator.acc_0;
     gyr_0 = estimator.gyr_0;
 
+    // 滑动窗口中最新帧并不是当前帧，中间隔着缓存队列的数据，所以还需要使用缓存队列中的IMU数据进行积分得到当前帧的里程计信息
     queue<sensor_msgs::ImuConstPtr> tmp_imu_buf = imu_buf;
     for (sensor_msgs::ImuConstPtr tmp_imu_msg; !tmp_imu_buf.empty(); tmp_imu_buf.pop())
         predict(tmp_imu_buf.front());
 
 }
 
-
-// 从imu_buf和feature_buf中读取IMU数据和特征点数据，并进行初步对齐。
-// 初步对齐的方式是：使一帧图像特征点数据与多帧IMU数据对应，这些IMU数据为该帧图像与上一帧图像的时间间隔内的所有IMU数据。
 std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>>
 getMeasurements()
 {
     std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
 
+    // 直到把imu_buf或者feature_buf中的数据全部取出，才会退出while循环
     while (true)
     {
         if (imu_buf.empty() || feature_buf.empty())
             return measurements;
 
-        // imu_buf队尾元素的时间戳，早于或等于feature_buf队首元素的时间戳，则需要等待接收IMU数据
-        if (!(imu_buf.back()->header.stamp > feature_buf.front()->header.stamp))
+        // imu_buf队尾元素的时间戳，早于或等于feature_buf队首元素的时间戳（时间偏移补偿后），则需要等待接收IMU数据
+        if (!(imu_buf.back()->header.stamp.toSec() > feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
-            ROS_WARN("wait for imu, only should happen at the beginning");
+            //ROS_WARN("wait for imu, only should happen at the beginning");
             sum_of_wait++;
             return measurements;
         }
 
-        // imu_buf队首元素的时间戳，晚于或等于feature_buf队首元素的时间戳，则需要剔除feature_buf队首多余的特征点数据
-        if (!(imu_buf.front()->header.stamp < feature_buf.front()->header.stamp))
+        // imu_buf队首元素的时间戳，晚于或等于feature_buf队首元素的时间戳（时间偏移补偿后），则需要剔除feature_buf队首多余的特征点数据
+        if (!(imu_buf.front()->header.stamp.toSec() < feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
             ROS_WARN("throw img, only should happen at the beginning");
-            feature_buf.pop(); // 剔除队首的特征点数据
+            feature_buf.pop();
             continue;
         }
         sensor_msgs::PointCloudConstPtr img_msg = feature_buf.front(); // 读取feature_buf队首的数据
         feature_buf.pop(); // 剔除feature_buf队首的数据
-
+        
         std::vector<sensor_msgs::ImuConstPtr> IMUs;
 
-        //图像特征点数据(img_msg)，对应多组在时间戳内的imu数据,然后塞入measurements
-        while (imu_buf.front()->header.stamp <= img_msg->header.stamp)
+        // 一帧图像特征点数据，对应多帧imu数据,把它们进行对应，然后塞入measurements
+        // 一帧图像特征点数据，与它和上一帧图像特征点数据之间的时间间隔内所有的IMU数据，以及时间戳晚于当前帧图像的第一帧IMU数据对应
+        // 如下图所示：
+        //   *             *             *             *             *            （IMU数据）
+        //                                                      |                 （图像特征点数据）
+        while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator.td)
         {
             IMUs.emplace_back(imu_buf.front());
             imu_buf.pop();
         }
+        IMUs.emplace_back(imu_buf.front()); // 时间戳晚于当前帧图像的第一帧IMU数据
 
-        measurements.emplace_back(IMUs, img_msg); // 向容器measurements内添加数据
+        if (IMUs.empty())
+            ROS_WARN("no imu between two image");
+        measurements.emplace_back(IMUs, img_msg);
     }
     return measurements;
 }
 
-// 订阅原始IMU数据的回调函数
 void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 {
-    m_buf.lock();//上锁
-    imu_buf.push(imu_msg); //将原始IMU数据存入缓存队列
-    m_buf.unlock();//解锁
-    con.notify_one();//唤醒getMeasurements()读取缓存imu_buf和feature_buf中的观测数据
+    if (imu_msg->header.stamp.toSec() <= last_imu_t)
+    {
+        ROS_WARN("imu message in disorder!");
+        return;
+    }
+    last_imu_t = imu_msg->header.stamp.toSec(); 
+
+    // 将IMU数据存入IMU数据缓存队列imu_buf
+    m_buf.lock();
+    imu_buf.push(imu_msg);
+    m_buf.unlock();
+    con.notify_one(); // 唤醒getMeasurements()读取缓存imu_buf和feature_buf中的观测数据
+
+    // 通过IMU测量值积分更新并发布里程计信息
+    last_imu_t = imu_msg->header.stamp.toSec(); // 这一行代码似乎重复了，上面有着一模一样的代码
 
     {
         std::lock_guard<std::mutex> lg(m_state);
-        predict(imu_msg);// 计算标称状态下本体坐标系在世界坐标系中的位移p、速度v和旋转q
+        predict(imu_msg);
         std_msgs::Header header = imu_msg->header;
         header.frame_id = "world";
-        if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
-            pubLatestOdometry(tmp_P, tmp_Q, tmp_V, header); //发布标称状态下的p、v、q
+        if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR) // VINS初始化已完成，正处于滑动窗口非线性优化状态，如果VINS还在初始化，则不发布里程计信息
+            pubLatestOdometry(tmp_P, tmp_Q, tmp_V, header); // 发布里程计信息，发布频率很高（与IMU数据同频），每次获取IMU数据都会及时进行更新，而且发布的是当前的里程计信息。
+            // 还有一个pubOdometry()函数，似乎也是发布里程计信息，但是它是在estimator每次处理完一帧图像特征点数据后才发布的，有延迟，而且频率也不高（至多与图像同频）
     }
 }
 
-// 订阅相机图像数据的回调函数
-void raw_image_callback(const sensor_msgs::ImageConstPtr &img_msg)
-{
-    cv_bridge::CvImagePtr img_ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);//ROS图像数据转换为opencv图像数据
-    //image_pool[img_msg->header.stamp.toNSec()] = img_ptr->image;
-    if(LOOP_CLOSURE) // 如果开启了回环检测模块才进行后续操作
-    {
-        i_buf.lock();
-        image_buf.push(make_pair(img_ptr->image, img_msg->header.stamp.toSec())); // 将图像数据和对应的时间戳保存到image_buf中去
-        i_buf.unlock();
-    }
-}
 
-// 订阅feature_tracker节点所跟踪特征点的回调函数
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
 {
+    if (!init_feature)
+    {
+        //skip the first detected feature, which doesn't contain optical flow speed
+        init_feature = 1;
+        return;
+    }
+
+    // 将图像特征点数据存入图像特征点数据缓存队列feature_buf
     m_buf.lock();
-    feature_buf.push(feature_msg); // 将feature_tracker节点发布的特征点数据保存到feature_buf中去
+    feature_buf.push(feature_msg);
     m_buf.unlock();
-    con.notify_one();//唤醒getMeasurements()读取缓存imu_buf和feature_buf中的观测数据
+    con.notify_one(); // 唤醒getMeasurements()读取缓存imu_buf和feature_buf中的观测数据
 }
 
-//发送IMU数据进行预积分
-void send_imu(const sensor_msgs::ImuConstPtr &imu_msg)
+void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
 {
-    double t = imu_msg->header.stamp.toSec(); // IMU时间戳
-    if (current_time < 0)
-        current_time = t;
-    double dt = t - current_time;
-    current_time = t;
+    if (restart_msg->data == true)
+    {
+        ROS_WARN("restart the estimator!");
+        m_buf.lock();
+        while(!feature_buf.empty())
+            feature_buf.pop();
+        while(!imu_buf.empty())
+            imu_buf.pop();
+        m_buf.unlock();
 
-    // 加速度计和陀螺仪偏置的先验值，此处设置为0
-    // 如果提前标定出了加速度计和陀螺仪偏置的先验值，则可以在这里设置
-    double ba[]{0.0, 0.0, 0.0};
-    double bg[]{0.0, 0.0, 0.0};
-
-    // 从IMU测量值中去除偏置
-    double dx = imu_msg->linear_acceleration.x - ba[0];
-    double dy = imu_msg->linear_acceleration.y - ba[1];
-    double dz = imu_msg->linear_acceleration.z - ba[2];
-
-    double rx = imu_msg->angular_velocity.x - bg[0];
-    double ry = imu_msg->angular_velocity.y - bg[1];
-    double rz = imu_msg->angular_velocity.z - bg[2];
-    //ROS_DEBUG("IMU %f, dt: %f, acc: %f %f %f, gyr: %f %f %f", t, dt, dx, dy, dz, rx, ry, rz);
-
-    estimator.processIMU(dt, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
+        m_estimator.lock();
+        estimator.clearState();
+        estimator.setParameter();
+        m_estimator.unlock();
+        current_time = -1;
+        last_imu_t = 0;
+    }
+    return;
 }
 
-//thread:loop detection
-void process_loop_detection()
+void relocalization_callback(const sensor_msgs::PointCloudConstPtr &points_msg)
 {
-    if(loop_closure == NULL)
-    {
-        const char *voc_file = VOC_FILE.c_str();
-        TicToc t_load_voc;
-        ROS_DEBUG("loop start loop");
-        cout << "voc file: " << voc_file << endl;
-        loop_closure = new LoopClosure(voc_file, IMAGE_COL, IMAGE_ROW);
-        ROS_DEBUG("loop load vocbulary %lf", t_load_voc.toc());
-        loop_closure->initCameraModel(CAM_NAMES);
-    }
-
-    while(LOOP_CLOSURE)
-    {
-        KeyFrame* cur_kf = NULL; 
-        m_keyframe_buf.lock();
-        while(!keyframe_buf.empty())
-        {
-            if(cur_kf!=NULL)
-                delete cur_kf;
-            cur_kf = keyframe_buf.front();
-            keyframe_buf.pop();
-        }
-        m_keyframe_buf.unlock();
-        if (cur_kf != NULL)
-        {
-            cur_kf->global_index = global_frame_cnt;
-            m_keyframedatabase_resample.lock();
-            keyframe_database.add(cur_kf);
-            m_keyframedatabase_resample.unlock();
-
-            cv::Mat current_image;
-            current_image = cur_kf->image;   
-
-            bool loop_succ = false;
-            int old_index = -1;
-            vector<cv::Point2f> cur_pts;
-            vector<cv::Point2f> old_pts;
-            TicToc t_brief;
-            cur_kf->extractBrief(current_image);
-            //printf("loop extract %d feature using %lf\n", cur_kf->keypoints.size(), t_brief.toc());
-            TicToc t_loopdetect;
-            loop_succ = loop_closure->startLoopClosure(cur_kf->keypoints, cur_kf->descriptors, cur_pts, old_pts, old_index);
-            double t_loop = t_loopdetect.toc();
-            ROS_DEBUG("t_loopdetect %f ms", t_loop);
-            if(loop_succ)
-            {
-                KeyFrame* old_kf = keyframe_database.getKeyframe(old_index);
-                if (old_kf == NULL)
-                {
-                    ROS_WARN("NO such frame in keyframe_database");
-                    ROS_BREAK();
-                }
-                ROS_DEBUG("loop succ %d with %drd image", global_frame_cnt, old_index);
-                assert(old_index!=-1);
-                
-                Vector3d T_w_i_old, PnP_T_old;
-                Matrix3d R_w_i_old, PnP_R_old;
-
-                old_kf->getPose(T_w_i_old, R_w_i_old);
-                std::vector<cv::Point2f> measurements_old;
-                std::vector<cv::Point2f> measurements_old_norm;
-                std::vector<cv::Point2f> measurements_cur;
-                std::vector<int> features_id_matched;  
-                cur_kf->findConnectionWithOldFrame(old_kf, measurements_old, measurements_old_norm, PnP_T_old, PnP_R_old, m_camera);
-                measurements_cur = cur_kf->measurements_matched;
-                features_id_matched = cur_kf->features_id_matched;
-                // send loop info to VINS relocalization
-                int loop_fusion = 0;
-                if( (int)measurements_old_norm.size() > MIN_LOOP_NUM && global_frame_cnt - old_index > 35 && old_index > 30)
-                {
-
-                    Quaterniond PnP_Q_old(PnP_R_old);
-                    RetriveData retrive_data;
-                    retrive_data.cur_index = cur_kf->global_index;
-                    retrive_data.header = cur_kf->header;
-                    retrive_data.P_old = T_w_i_old;
-                    retrive_data.R_old = R_w_i_old;
-                    retrive_data.relative_pose = false;
-                    retrive_data.relocalized = false;
-                    retrive_data.measurements = measurements_old_norm;
-                    retrive_data.features_ids = features_id_matched;
-                    retrive_data.loop_pose[0] = PnP_T_old.x();
-                    retrive_data.loop_pose[1] = PnP_T_old.y();
-                    retrive_data.loop_pose[2] = PnP_T_old.z();
-                    retrive_data.loop_pose[3] = PnP_Q_old.x();
-                    retrive_data.loop_pose[4] = PnP_Q_old.y();
-                    retrive_data.loop_pose[5] = PnP_Q_old.z();
-                    retrive_data.loop_pose[6] = PnP_Q_old.w();
-                    m_retrive_data_buf.lock();
-                    retrive_data_buf.push(retrive_data);
-                    m_retrive_data_buf.unlock();
-                    cur_kf->detectLoop(old_index);
-                    old_kf->is_looped = 1;
-                    loop_fusion = 1;
-
-                    m_update_visualization.lock();
-                    keyframe_database.addLoop(old_index);
-                    CameraPoseVisualization* posegraph_visualization = keyframe_database.getPosegraphVisualization();
-                    pubPoseGraph(posegraph_visualization, cur_header);  
-                    m_update_visualization.unlock();
-                }
-
-
-                // visualization loop info
-                if(0 && loop_fusion)
-                {
-                    int COL = current_image.cols;
-                    //int ROW = current_image.rows;
-                    cv::Mat gray_img, loop_match_img;
-                    cv::Mat old_img = old_kf->image;
-                    cv::hconcat(old_img, current_image, gray_img);
-                    cvtColor(gray_img, loop_match_img, CV_GRAY2RGB);
-                    cv::Mat loop_match_img2;
-                    loop_match_img2 = loop_match_img.clone();
-                    /*
-                    for(int i = 0; i< (int)cur_pts.size(); i++)
-                    {
-                        cv::Point2f cur_pt = cur_pts[i];
-                        cur_pt.x += COL;
-                        cv::circle(loop_match_img, cur_pt, 5, cv::Scalar(0, 255, 0));
-                    }
-                    for(int i = 0; i< (int)old_pts.size(); i++)
-                    {
-                        cv::circle(loop_match_img, old_pts[i], 5, cv::Scalar(0, 255, 0));
-                    }
-                    for (int i = 0; i< (int)old_pts.size(); i++)
-                    {
-                        cv::Point2f cur_pt = cur_pts[i];
-                        cur_pt.x += COL ;
-                        cv::line(loop_match_img, old_pts[i], cur_pt, cv::Scalar(0, 255, 0), 1, 8, 0);
-                    }
-                    ostringstream convert;
-                    convert << "/home/tony-ws/raw_data/loop_image/"
-                            << cur_kf->global_index << "-" 
-                            << old_index << "-" << loop_fusion <<".jpg";
-                    cv::imwrite( convert.str().c_str(), loop_match_img);
-                    */
-                    for(int i = 0; i< (int)measurements_cur.size(); i++)
-                    {
-                        cv::Point2f cur_pt = measurements_cur[i];
-                        cur_pt.x += COL;
-                        cv::circle(loop_match_img2, cur_pt, 5, cv::Scalar(0, 255, 0));
-                    }
-                    for(int i = 0; i< (int)measurements_old.size(); i++)
-                    {
-                        cv::circle(loop_match_img2, measurements_old[i], 5, cv::Scalar(0, 255, 0));
-                    }
-                    for (int i = 0; i< (int)measurements_old.size(); i++)
-                    {
-                        cv::Point2f cur_pt = measurements_cur[i];
-                        cur_pt.x += COL ;
-                        cv::line(loop_match_img2, measurements_old[i], cur_pt, cv::Scalar(0, 255, 0), 1, 8, 0);
-                    }
-
-                    ostringstream convert2;
-                    convert2 << "/home/tony-ws/raw_data/loop_image/"
-                            << cur_kf->global_index << "-" 
-                            << old_index << "-" << loop_fusion <<"-2.jpg";
-                    cv::imwrite( convert2.str().c_str(), loop_match_img2);
-                }
-                  
-            }
-            //release memory
-            cur_kf->image.release();
-            global_frame_cnt++;
-
-            if (t_loop > 1000 || keyframe_database.size() > MAX_KEYFRAME_NUM)
-            {
-                m_keyframedatabase_resample.lock();
-                erase_index.clear();
-                keyframe_database.downsample(erase_index);
-                m_keyframedatabase_resample.unlock();
-                if(!erase_index.empty())
-                    loop_closure->eraseIndex(erase_index);
-            }
-        }
-        std::chrono::milliseconds dura(10);
-        std::this_thread::sleep_for(dura);
-    }
-}
-
-//thread: pose_graph optimization
-void process_pose_graph()
-{
-    while(true)
-    {
-        m_posegraph_buf.lock();
-        int index = -1;
-        while (!optimize_posegraph_buf.empty())
-        {
-            index = optimize_posegraph_buf.front();
-            optimize_posegraph_buf.pop();
-        }
-        m_posegraph_buf.unlock();
-        if(index != -1)
-        {
-            Vector3d correct_t = Vector3d::Zero();
-            Matrix3d correct_r = Matrix3d::Identity();
-            TicToc t_posegraph;
-            keyframe_database.optimize4DoFLoopPoseGraph(index,
-                                                    correct_t,
-                                                    correct_r);
-            ROS_DEBUG("t_posegraph %f ms", t_posegraph.toc());
-            m_loop_drift.lock();
-            relocalize_r = correct_r;
-            relocalize_t = correct_t;
-            m_loop_drift.unlock();
-            m_update_visualization.lock();
-            keyframe_database.updateVisualization();
-            CameraPoseVisualization* posegraph_visualization = keyframe_database.getPosegraphVisualization();
-            m_update_visualization.unlock();
-            pubOdometry(estimator, cur_header, relocalize_t, relocalize_r);
-            pubPoseGraph(posegraph_visualization, cur_header); 
-            nav_msgs::Path refine_path = keyframe_database.getPath();
-            updateLoopPath(refine_path);
-        }
-
-        std::chrono::milliseconds dura(5000);
-        std::this_thread::sleep_for(dura);
-    }
+    //printf("relocalization callback! \n");
+    m_buf.lock();
+    relo_buf.push(points_msg);
+    m_buf.unlock();
 }
 
 // thread: visual-inertial odometry
-// 视觉惯性里程计的实现
+// process()是measurement_process线程的线程函数，在process()中处理VIO后端，包括IMU预积分、松耦合初始化和local BA
 void process()
 {
     while (true)
     {
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
 
-        // unique_lock对象lk以独占所有权的方式管理mutex对象m_buf的上锁和解锁操作，所谓独占所有权，就是没有其他的 unique_lock对象同时拥有m_buf的所有权
+        // unique_lock对象lk以独占所有权的方式管理mutex对象m_buf的上锁和解锁操作，所谓独占所有权，就是没有其他的 unique_lock对象同时拥有m_buf的所有权，
         // 新创建的unique_lock对象lk管理Mutex对象m_buf，并尝试调用m_buf.lock()对Mutex对象m_buf进行上锁，如果此时另外某个unique_lock对象已经管理了该Mutex对象m_buf,
         // 则当前线程将会被阻塞；如果此时m_buf本身就处于上锁状态，当前线程也会被阻塞（我猜的）。
         // 在unique_lock对象lk的声明周期内，它所管理的锁对象m_buf会一直保持上锁状态
-        std::unique_lock<std::mutex> lk(m_buf); 
-        
+        std::unique_lock<std::mutex> lk(m_buf);
+
         // std::condition_variable::wait(std::unique_lock<std::mutex>& lock, Predicate pred)的功能：
         // while (!pred()) 
         // {
@@ -482,144 +256,148 @@ void process()
         // 直到pred为ture的时候，退出while循环。
 
         // [&]{return (measurements = getMeasurements()).size() != 0;}是lamda表达式（匿名函数）
-        // 先调用匿名函数，从缓存队列中读取IMU数据和图像特征点数据，如果measurements为空，则匿名函数返回false，调用wait(lock)，释放m_buf，阻塞当前线程，等待被con.notify_one()唤醒
+        // 先调用匿名函数，从缓存队列中读取IMU数据和图像特征点数据，如果measurements为空，则匿名函数返回false，调用wait(lock)，
+        // 释放m_buf（为了使图像和IMU回调函数可以访问缓存队列），阻塞当前线程，等待被con.notify_one()唤醒
         // 直到measurements不为空时（成功从缓存队列获取数据），匿名函数返回true，则可以退出while循环。
         con.wait(lk, [&]
                  {
-            return (measurements = getMeasurements()).size() != 0; // 读取时间戳初步对齐的图像特征点数据和IMU数据
+            return (measurements = getMeasurements()).size() != 0;
                  });
-        lk.unlock();
+        lk.unlock(); // 从缓存队列中读取数据完成，解锁
 
-        for (auto &measurement : measurements) // 对于measurements中的每一个measurement
+        m_estimator.lock();
+        for (auto &measurement : measurements)
         {
+            auto img_msg = measurement.second;
+            double dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
+
             //遍历该组中的各帧imu数据，进行预积分
             for (auto &imu_msg : measurement.first)
-                send_imu(imu_msg);
+            {
+                double t = imu_msg->header.stamp.toSec(); // 最新IMU数据的时间戳
+                double img_t = img_msg->header.stamp.toSec() + estimator.td; // 图像特征点数据的时间戳，补偿了通过优化得到的一个时间偏移
+                if (t <= img_t) // 补偿时间偏移后，图像特征点数据的时间戳晚于或等于IMU数据的时间戳
+                { 
+                    if (current_time < 0) // 第一次接收IMU数据时会出现这种情况
+                        current_time = t;
+                    double dt = t - current_time;
+                    ROS_ASSERT(dt >= 0);
+                    current_time = t; // 更新最近一次接收的IMU数据的时间戳
 
-            // 这一组IMU数据对应的图像特征点数据
-            auto img_msg = measurement.second;
+                    // IMU数据测量值
+                    // 3轴加速度测量值
+                    dx = imu_msg->linear_acceleration.x;
+                    dy = imu_msg->linear_acceleration.y;
+                    dz = imu_msg->linear_acceleration.z;
+
+                    // 3轴角速度测量值
+                    rx = imu_msg->angular_velocity.x;
+                    ry = imu_msg->angular_velocity.y;
+                    rz = imu_msg->angular_velocity.z;
+                    estimator.processIMU(dt, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
+                    //printf("imu: dt:%f a: %f %f %f w: %f %f %f\n",dt, dx, dy, dz, rx, ry, rz);
+
+                }
+                else // 时间戳晚于图像特征点数据（时间偏移补偿后）的第一帧IMU数据（也是一组measurement中的唯一一帧），对IMU数据进行插值，得到图像帧时间戳对应的IMU数据
+                {
+                    // 时间戳的对应关系如下图所示：
+                    //                                            current_time         t
+                    // *               *               *               *               *     （IMU数据）
+                    //                                                          |            （图像特征点数据）
+                    //                                                        img_t
+                    double dt_1 = img_t - current_time;
+                    double dt_2 = t - img_t;
+                    current_time = img_t;
+                    ROS_ASSERT(dt_1 >= 0);
+                    ROS_ASSERT(dt_2 >= 0);
+                    ROS_ASSERT(dt_1 + dt_2 > 0);
+                    double w1 = dt_2 / (dt_1 + dt_2);
+                    double w2 = dt_1 / (dt_1 + dt_2);
+                    dx = w1 * dx + w2 * imu_msg->linear_acceleration.x;
+                    dy = w1 * dy + w2 * imu_msg->linear_acceleration.y;
+                    dz = w1 * dz + w2 * imu_msg->linear_acceleration.z;
+                    rx = w1 * rx + w2 * imu_msg->angular_velocity.x;
+                    ry = w1 * ry + w2 * imu_msg->angular_velocity.y;
+                    rz = w1 * rz + w2 * imu_msg->angular_velocity.z;
+                    estimator.processIMU(dt_1, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
+                    //printf("dimu: dt:%f a: %f %f %f w: %f %f %f\n",dt_1, dx, dy, dz, rx, ry, rz);
+                }
+            }
+
+            // 重定位
+            // set relocalization frame
+            sensor_msgs::PointCloudConstPtr relo_msg = NULL;
+            while (!relo_buf.empty())
+            {
+                relo_msg = relo_buf.front();
+                relo_buf.pop();
+            }
+            if (relo_msg != NULL)
+            {
+                vector<Vector3d> match_points;
+                double frame_stamp = relo_msg->header.stamp.toSec();
+                for (unsigned int i = 0; i < relo_msg->points.size(); i++)
+                {
+                    Vector3d u_v_id;
+                    u_v_id.x() = relo_msg->points[i].x;
+                    u_v_id.y() = relo_msg->points[i].y;
+                    u_v_id.z() = relo_msg->points[i].z;
+                    match_points.push_back(u_v_id);
+                }
+                Vector3d relo_t(relo_msg->channels[0].values[0], relo_msg->channels[0].values[1], relo_msg->channels[0].values[2]);
+                Quaterniond relo_q(relo_msg->channels[0].values[3], relo_msg->channels[0].values[4], relo_msg->channels[0].values[5], relo_msg->channels[0].values[6]);
+                Matrix3d relo_r = relo_q.toRotationMatrix();
+                int frame_index;
+                frame_index = relo_msg->channels[0].values[7];
+                estimator.setReloFrame(frame_stamp, frame_index, match_points, relo_t, relo_r);
+            }
+
+
             ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
-
             TicToc t_s;
-            map<int, vector<pair<int, Vector3d>>> image;
-            // 将图像特征点数据存到一个关联容器map中
+            // 将图像特征点数据存到一个map容器中，key是特征点id
+            map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
-                int v = img_msg->channels[0].values[i] + 0.5; // ？？？这是什么操作，加0.5是什么意思？？？img_msg->channels[0].values[i]存的是相应特征点的id
-                int feature_id = v / NUM_OF_CAM; // ？？？这是什么操作？？？
-                int camera_id = v % NUM_OF_CAM; // ？？？这是什么操作？？？
+                int v = img_msg->channels[0].values[i] + 0.5; // ？？？这是什么操作
+                int feature_id = v / NUM_OF_CAM;
+                int camera_id = v % NUM_OF_CAM;
                 double x = img_msg->points[i].x;
                 double y = img_msg->points[i].y;
                 double z = img_msg->points[i].z;
+                double p_u = img_msg->channels[1].values[i];
+                double p_v = img_msg->channels[2].values[i];
+                double velocity_x = img_msg->channels[3].values[i];
+                double velocity_y = img_msg->channels[4].values[i];
                 ROS_ASSERT(z == 1);
-                image[feature_id].emplace_back(camera_id, Vector3d(x, y, z));
+                Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
+                xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
+                image[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
             }
-            estimator.processImage(image, img_msg->header); // 处理图像特征点数据
+            estimator.processImage(image, img_msg->header);
 
-            /**
-            *** start build keyframe database for loop closure
-            **/
-            // 构建关键帧数据库，用于回环检测
-            if(LOOP_CLOSURE)
-            {
-                // remove previous loop
-                vector<RetriveData>::iterator it = estimator.retrive_data_vector.begin();
-                for(; it != estimator.retrive_data_vector.end(); )
-                {
-                    if ((*it).header < estimator.Headers[0].stamp.toSec())
-                    {
-                        it = estimator.retrive_data_vector.erase(it);
-                    }
-                    else
-                        it++;
-                }
-                m_retrive_data_buf.lock();
-                while(!retrive_data_buf.empty())
-                {
-                    RetriveData tmp_retrive_data = retrive_data_buf.front();
-                    retrive_data_buf.pop();
-                    estimator.retrive_data_vector.push_back(tmp_retrive_data);
-                }
-                m_retrive_data_buf.unlock();
-                //WINDOW_SIZE - 2 is key frame
-                if(estimator.marginalization_flag == 0 && estimator.solver_flag == estimator.NON_LINEAR)
-                {   
-                    Vector3d vio_T_w_i = estimator.Ps[WINDOW_SIZE - 2];
-                    Matrix3d vio_R_w_i = estimator.Rs[WINDOW_SIZE - 2];
-                    i_buf.lock();
-                    while(!image_buf.empty() && image_buf.front().second < estimator.Headers[WINDOW_SIZE - 2].stamp.toSec())
-                    {
-                        image_buf.pop();
-                    }
-                    i_buf.unlock();
-                    //assert(estimator.Headers[WINDOW_SIZE - 1].stamp.toSec() == image_buf.front().second);
-                    // relative_T   i-1_T_i relative_R  i-1_R_i
-                    cv::Mat KeyFrame_image;
-                    KeyFrame_image = image_buf.front().first;
-                    
-                    const char *pattern_file = PATTERN_FILE.c_str();
-                    Vector3d cur_T;
-                    Matrix3d cur_R;
-                    cur_T = relocalize_r * vio_T_w_i + relocalize_t;
-                    cur_R = relocalize_r * vio_R_w_i;
-                    KeyFrame* keyframe = new KeyFrame(estimator.Headers[WINDOW_SIZE - 2].stamp.toSec(), vio_T_w_i, vio_R_w_i, cur_T, cur_R, image_buf.front().first, pattern_file);
-                    keyframe->setExtrinsic(estimator.tic[0], estimator.ric[0]);
-                    keyframe->buildKeyFrameFeatures(estimator, m_camera);
-                    m_keyframe_buf.lock();
-                    keyframe_buf.push(keyframe);
-                    m_keyframe_buf.unlock();
-                    // update loop info
-                    if (!estimator.retrive_data_vector.empty() && estimator.retrive_data_vector[0].relative_pose)
-                    {
-                        if(estimator.Headers[0].stamp.toSec() == estimator.retrive_data_vector[0].header)
-                        {
-                            KeyFrame* cur_kf = keyframe_database.getKeyframe(estimator.retrive_data_vector[0].cur_index);                            
-                            if (abs(estimator.retrive_data_vector[0].relative_yaw) > 30.0 || estimator.retrive_data_vector[0].relative_t.norm() > 20.0)
-                            {
-                                ROS_DEBUG("Wrong loop");
-                                cur_kf->removeLoop();
-                            }
-                            else 
-                            {
-                                cur_kf->updateLoopConnection( estimator.retrive_data_vector[0].relative_t, 
-                                                              estimator.retrive_data_vector[0].relative_q, 
-                                                              estimator.retrive_data_vector[0].relative_yaw);
-                                m_posegraph_buf.lock();
-                                optimize_posegraph_buf.push(estimator.retrive_data_vector[0].cur_index);
-                                m_posegraph_buf.unlock();
-                            }
-                        }
-                    }
-                }
-            }
             double whole_t = t_s.toc();
             printStatistics(estimator, whole_t);
             std_msgs::Header header = img_msg->header;
             header.frame_id = "world";
-            cur_header = header;
-            m_loop_drift.lock();
 
-            // 重定位
-            if (estimator.relocalize)
-            {
-                relocalize_t = estimator.relocalize_t;
-                relocalize_r = estimator.relocalize_r;
-            }
-
-            // 发布数据，用于Rviz显示
-            pubOdometry(estimator, header, relocalize_t, relocalize_r);
-            pubKeyPoses(estimator, header, relocalize_t, relocalize_r);
-            pubCameraPose(estimator, header, relocalize_t, relocalize_r);
-            pubPointCloud(estimator, header, relocalize_t, relocalize_r);
-            pubTF(estimator, header, relocalize_t, relocalize_r);
-            m_loop_drift.unlock();
+            // 每处理完一帧图像特征点数据，都要发布这些话题
+            pubOdometry(estimator, header);
+            pubKeyPoses(estimator, header);
+            pubCameraPose(estimator, header);
+            pubPointCloud(estimator, header);
+            pubTF(estimator, header);
+            pubKeyframe(estimator);
+            if (relo_msg != NULL)
+                pubRelocalization(estimator);
             //ROS_ERROR("end: %f, at %f", img_msg->header.stamp.toSec(), ros::Time::now().toSec());
         }
+        m_estimator.unlock();
 
-        // 非线性优化
         m_buf.lock();
         m_state.lock();
         if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+            // VINS系统完成滑动窗口优化后，用优化后的结果，更新里程计数据
             update();
         m_state.unlock();
         m_buf.unlock();
@@ -639,22 +417,17 @@ int main(int argc, char **argv)
     ROS_WARN("waiting for image and imu...");
 
     //RViz相关话题
-    registerPub(n); // 注册visualization.cpp中创建的10个发布器
+    registerPub(n); // 注册visualization.cpp中创建的发布器
+    
+    ros::Subscriber sub_imu = n.subscribe(IMU_TOPIC, 2000, imu_callback, ros::TransportHints().tcpNoDelay()); // IMU数据
+    ros::Subscriber sub_image = n.subscribe("/feature_tracker/feature", 2000, feature_callback); // 图像特征点数据
+    ros::Subscriber sub_restart = n.subscribe("/feature_tracker/restart", 2000, restart_callback); // ？？？接收一个bool值，判断是否重启estimator
+    ros::Subscriber sub_relo_points = n.subscribe("/pose_graph/match_points", 2000, relocalization_callback); // ？？？根据回环检测信息进行重定位
 
-    //订阅IMU,feature,image的topic,然后在各自的回调里处理消息
-    ros::Subscriber sub_imu = n.subscribe(IMU_TOPIC, 2000, imu_callback, ros::TransportHints().tcpNoDelay());
-    ros::Subscriber sub_image = n.subscribe("/feature_tracker/feature", 2000, feature_callback);
-    ros::Subscriber sub_raw_image = n.subscribe(IMAGE_TOPIC, 2000, raw_image_callback);
-
-    std::thread measurement_process{process};
-    std::thread loop_detection, pose_graph;
-    if (LOOP_CLOSURE)
-    {
-        ROS_WARN("LOOP_CLOSURE true");
-        loop_detection = std::thread(process_loop_detection);   
-        pose_graph = std::thread(process_pose_graph);
-        m_camera = CameraFactory::instance()->generateCameraFromYamlFile(CAM_NAMES);
-    }
+    // estimator_node中的线程由旧版本中的3个改为现在的1个
+    // 回环检测和全局位姿图优化在新增的一个ROS节点中运行
+    // measurement_process线程的线程函数是process()，在process()中处理VIO后端，包括IMU预积分、松耦合初始化和local BA
+    std::thread measurement_process{process}; 
     ros::spin();
 
     return 0;

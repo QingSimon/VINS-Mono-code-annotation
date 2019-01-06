@@ -5,7 +5,6 @@ int FeaturePerId::endFrame()
     return start_frame + feature_per_frame.size() - 1;
 }
 
-// 构造函数
 FeatureManager::FeatureManager(Matrix3d _Rs[])
     : Rs(_Rs)
 {
@@ -13,7 +12,6 @@ FeatureManager::FeatureManager(Matrix3d _Rs[])
         ric[i].setIdentity();
 }
 
-// 设置camera与IMU之间的外参之一：旋转
 void FeatureManager::setRic(Matrix3d _ric[])
 {
     for (int i = 0; i < NUM_OF_CAM; i++)
@@ -46,10 +44,10 @@ int FeatureManager::getFeatureCount()
 /**
  * 把当前帧图像（frame_count）的特征点添加到feature容器中
  * 计算第2最新帧与第3最新帧之间的平均视差（当前帧是第1最新帧）
- * 也就是说当前帧图像特征点存入feature中后，并不会立即判断是否将当前帧添加为新的关键帧，而是去判断当前帧的前一帧。
+ * 也就是说当前帧图像特征点存入feature中后，并不会立即判断是否将当前帧添加为新的关键帧，而是去判断当前帧的前一帧（第2最新帧）。
  * 当前帧图像要在下一次接收到图像时进行判断（那个时候，当前帧已经变成了第2最新帧）
  */
-bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Vector3d>>> &image)
+bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
 {
     ROS_DEBUG("input feature: %d", (int)image.size());
     ROS_DEBUG("num of feature: %d", getFeatureCount());
@@ -57,10 +55,11 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
     int parallax_num = 0; // 第2最新帧和第3最新帧之间跟踪到的特征点的数量
     last_track_num = 0; // 当前帧（第1最新帧）图像跟踪到的特征点的数量
 
-    //每个feature有可能出现多个帧中，share same id，放入feature容器中
+    // 把当前帧图像特征点数据image添加到feature容器中
+    // feature容器按照特征点id组织特征点数据，对于每个id的特征点，记录它被滑动窗口中哪些图像帧观测到了
     for (auto &id_pts : image)
-    {        
-        FeaturePerFrame f_per_fra(id_pts.second[0].second);
+    {
+        FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
 
         int feature_id = id_pts.first;
 
@@ -74,7 +73,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
             return it.feature_id == feature_id;
                           });
 
-        // 返回尾部迭代器，说明该特征点第一次出现，需要在feature中新建一个FeaturePerId对象
+        // 返回尾部迭代器，说明该特征点第一次出现（在当前帧中新检测的特征点），需要在feature中新建一个FeaturePerId对象
         if (it == feature.end())
         {
             feature.push_back(FeaturePerId(feature_id, frame_count));
@@ -87,9 +86,11 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         }
     }
 
-    // 如果是前两帧图像 || ？？？？
+    // 1. 当前帧的帧号小于2，即为0或1，为0，则没有第2最新帧，为1，则第2最新帧是滑动窗口中的第1帧
+    // 2. 当前帧（第1最新帧）跟踪到的特征点数量小于20（？？？为什么当前帧的跟踪质量不好，就把第2最新帧当作关键帧？？？）
+    // 出现以上2种情况的任意一种，则认为第2最新帧是关键帧
     if (frame_count < 2 || last_track_num < 20)
-        return true; // 是关键帧
+        return true; // 第2最新帧是关键帧
 
     // 计算第2最新帧和第3最新帧之间跟踪到的特征点的平均视差
     for (auto &it_per_id : feature)
@@ -97,8 +98,10 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         if (it_per_id.start_frame <= frame_count - 2 &&
             it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1)
         {
+            // 对于给定id的特征点，计算第2最新帧和第3最新帧之间该特征点的视差（当前帧frame_count是第1最新帧）
+            //（需要使用IMU数据补偿由于旋转造成的视差）
             parallax_sum += compensatedParallax2(it_per_id, frame_count);
-            parallax_num++; // 第2最新帧和第3最新帧之间跟踪到的特征点的数量
+            parallax_num++;
         }
     }
 
@@ -106,6 +109,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
     {
         // 如果第2最新帧和第3最新帧之间跟踪到的特征点的数量为0，则把第2最新帧添加为关键帧
         // ？？怎么会出现这种情况？？？？
+        // 如果出现这种情况，那么第2最新帧和第3最新帧之间的视觉约束关系不就没有了？？？
         return true;
     }
     else
@@ -113,7 +117,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         // 计算平均视差
         ROS_DEBUG("parallax_sum: %lf, parallax_num: %d", parallax_sum, parallax_num);
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
-        return parallax_sum / parallax_num >= MIN_PARALLAX; // 如果平均视差大于一个设定的阈值，则把第2最新帧当作关键帧
+        return parallax_sum / parallax_num >= MIN_PARALLAX; // 如果平均视差大于设定的阈值，则把第2最新帧当作关键帧
     }
 }
 
@@ -138,7 +142,6 @@ void FeatureManager::debugShow()
     }
 }
 
-// 获取指定的两帧图像之间特征点的对应关系
 vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_count_l, int frame_count_r)
 {
     vector<pair<Vector3d, Vector3d>> corres;
@@ -382,13 +385,13 @@ void FeatureManager::removeFront(int frame_count)
 double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int frame_count)
 {
     //check the second last frame is keyframe or not
-    //parallax between second last frame and third last frame
+    //parallax betwwen seconde last frame and third last frame
     const FeaturePerFrame &frame_i = it_per_id.feature_per_frame[frame_count - 2 - it_per_id.start_frame]; // 第3最新帧
     const FeaturePerFrame &frame_j = it_per_id.feature_per_frame[frame_count - 1 - it_per_id.start_frame]; // 第2最新帧
 
-    double ans = 0; // 初始化视差
+    double ans = 0;// 初始化视差
 
-    // 以下的神仙操作暂时没有看懂
+    // 以下的操作暂时没有看懂
     Vector3d p_j = frame_j.point;
 
     double u_j = p_j(0);
@@ -406,7 +409,6 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int f
     double v_i = p_i(1) / dep_i;
     double du = u_i - u_j, dv = v_i - v_j;
 
-    // ???
     double dep_i_comp = p_i_comp(2);
     double u_i_comp = p_i_comp(0) / dep_i_comp;
     double v_i_comp = p_i_comp(1) / dep_i_comp;

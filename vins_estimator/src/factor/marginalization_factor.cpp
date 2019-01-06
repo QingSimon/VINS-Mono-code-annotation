@@ -73,7 +73,7 @@ MarginalizationInfo::~MarginalizationInfo()
     //ROS_WARN("release marginlizationinfo");
     
     for (auto it = parameter_block_data.begin(); it != parameter_block_data.end(); ++it)
-        delete it->second;
+        delete[] it->second;
 
     for (int i = 0; i < (int)factors.size(); i++)
     {
@@ -107,8 +107,6 @@ void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block
     }
 }
 
-//调用Evaluate()计算各个部分的残差
-//参数块拷贝到parameter_block_data容器中
 void MarginalizationInfo::preMarginalize()
 {
     for (auto it : factors)
@@ -140,7 +138,6 @@ int MarginalizationInfo::globalSize(int size) const
     return size == 6 ? 7 : size;
 }
 
-//多线程构造边缘化矩阵H
 void* ThreadsConstructA(void* threadsstruct)
 {
     ThreadsStruct* p = ((ThreadsStruct*)threadsstruct);
@@ -174,10 +171,6 @@ void* ThreadsConstructA(void* threadsstruct)
     return threadsstruct;
 }
 
-//边缘化
-//多线程构造Hx=b的结构，H是边缘化后的结果（根据parameter_block_idx里面的标记）
-//使用Schur complement简化计算过程
-//First Esitimate Jacobian,在X0处线性化
 void MarginalizationInfo::marginalize()
 {
     int pos = 0;
@@ -294,12 +287,6 @@ void MarginalizationInfo::marginalize()
     Eigen::VectorXd S_sqrt = S.cwiseSqrt();
     Eigen::VectorXd S_inv_sqrt = S_inv.cwiseSqrt();
 
-
-    //FEJ First Estimate Jacobians，以后计算关于先验的误差和Jacobian都在边缘化的这个线性点展开，有点费劲，参考资料：
-    //http://blog.csdn.net/heyijia0327/article/details/53707261 DSO 中的Windowed Optimization
-    //https://mp.weixin.qq.com/s?__biz=MzI5MTM1MTQwMw==&mid=2247486797&idx=1&sn=6ae98c0c52ce74ddb5cdc17f3e0113b7&chksm=ec10b349db673a5fdc7c9db385eb39efc0a9724519a8ece8ce5dbe504d33e4ba099dafbcc65f&mpshare=1&scene=24&srcid=1113T4dVqwLiyL4XDMDerW4Z#rd
-    //OKVIS理论推导（下） SLAM中的marginalization 和 Schur complement
-    //http://blog.csdn.net/heyijia0327/article/details/52822104
     linearized_jacobians = S_sqrt.asDiagonal() * saes2.eigenvectors().transpose();
     linearized_residuals = S_inv_sqrt.asDiagonal() * saes2.eigenvectors().transpose() * b;
     //std::cout << A << std::endl
@@ -343,8 +330,6 @@ MarginalizationFactor::MarginalizationFactor(MarginalizationInfo* _marginalizati
     set_num_residuals(marginalization_info->n);
 };
 
-//先验残差
-//1.根据FEJ，固定线性化的点，更新这里的residuals和Jacobian
 bool MarginalizationFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
 {
     //printf("internal addr,%d, %d\n", (int)parameter_block_sizes().size(), num_residuals());

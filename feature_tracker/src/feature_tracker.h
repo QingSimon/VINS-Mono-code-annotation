@@ -25,17 +25,12 @@ bool inBorder(const cv::Point2f &pt);
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status);
 void reduceVector(vector<int> &v, vector<uchar> status);
 
-/**
- * FeatureTracker类定义了相机的行为
- * 
- * 
-**/
 class FeatureTracker
 {
   public:
-    FeatureTracker();//构造函数实际上是空的，什么都没做
+    FeatureTracker();
 
-    void readImage(const cv::Mat &_img);//FeatureTracker类中最主要的处理函数
+    void readImage(const cv::Mat &_img,double _cur_time);
 
     void setMask();
 
@@ -49,30 +44,22 @@ class FeatureTracker
 
     void rejectWithF();
 
-    vector<cv::Point2f> undistortedPoints();
+    void undistortedPoints();
 
     cv::Mat mask;
-    cv::Mat fisheye_mask;//鱼眼相机mask，用来去除边缘噪点
-
-    // prev_img是上一次发布的帧的图像数据
-    // cur_img是光流跟踪的前一帧的图像数据
-    // forw_img是光流跟踪的后一帧的图像数据
+    cv::Mat fisheye_mask;
     cv::Mat prev_img, cur_img, forw_img;
-
-    vector<cv::Point2f> n_pts;//每一帧中新提取的特征点
-
-    // prev_img是上一次发布的帧的特征点数据
-    // cur_img是光流跟踪的前一帧的特征点数据
-    // forw_img是光流跟踪的后一帧的特征点数据
+    vector<cv::Point2f> n_pts;
     vector<cv::Point2f> prev_pts, cur_pts, forw_pts;
-    
-    vector<int> ids;//能够被跟踪到的特征点的id
-
-    vector<int> track_cnt; //当前帧forw_img中每个特征点被追踪的时间次数
-
+    vector<cv::Point2f> prev_un_pts, cur_un_pts;
+    vector<cv::Point2f> pts_velocity;
+    vector<int> ids;
+    vector<int> track_cnt;
+    map<int, cv::Point2f> cur_un_pts_map;
+    map<int, cv::Point2f> prev_un_pts_map;
     camodocal::CameraPtr m_camera;
+    double cur_time;
+    double prev_time;
 
-    //由于可能有多个相机，那么就有多个FeatureTracker的实例，而多个相机需要共享一个n_id
-    //对n_id做static修饰，可以使得n_id被FeatureTracker的多个实例对象共享
-    static int n_id;//用来作为特征点id，每检测到一个新的特征点，就将n_id作为该特征点的id，然后n_id加1
+    static int n_id;
 };

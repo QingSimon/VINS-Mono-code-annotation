@@ -18,12 +18,21 @@ using namespace Eigen;
 class FeaturePerFrame
 {
   public:
-    FeaturePerFrame(const Vector3d &_point)
+    FeaturePerFrame(const Eigen::Matrix<double, 7, 1> &_point, double td)
     {
-        z = _point(2);
-        point = _point / z;
+        point.x() = _point(0);
+        point.y() = _point(1);
+        point.z() = _point(2);
+        uv.x() = _point(3);
+        uv.y() = _point(4);
+        velocity.x() = _point(5); 
+        velocity.y() = _point(6); 
+        cur_td = td;
     }
+    double cur_td;
     Vector3d point;
+    Vector2d uv;
+    Vector2d velocity;
     double z;
     bool is_used;
     double parallax;
@@ -67,10 +76,8 @@ class FeatureManager
 
     int getFeatureCount();
 
-    bool addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Vector3d>>> &image);
+    bool addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td);
     void debugShow();
-
-    // 获取指定的两帧图像之间特征点的对应关系
     vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l, int frame_count_r);
 
     //void updateDepth(const VectorXd &x);
@@ -83,8 +90,8 @@ class FeatureManager
     void removeBack();
     void removeFront(int frame_count);
     void removeOutlier();
-    list<FeaturePerId> feature; // 管理所有的特征点
-    int last_track_num; // 当前帧图像跟踪到的特征点的数量
+    list<FeaturePerId> feature; // 管理滑动窗口中所有的特征点
+    int last_track_num; // 最新帧图像跟踪到的特征点的数量
 
   private:
     double compensatedParallax2(const FeaturePerId &it_per_id, int frame_count);

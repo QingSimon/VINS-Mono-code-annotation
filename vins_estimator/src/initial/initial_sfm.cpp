@@ -71,7 +71,6 @@ bool GlobalSFM::solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,
 
 }
 
-//三角化两帧内的所有对应feature,放入sfm_f中，三角化成功的state设为true
 void GlobalSFM::triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Pose0, 
 									 int frame1, Eigen::Matrix<double, 3, 4> &Pose1,
 									 vector<SFMFeature> &sfm_f)
@@ -123,7 +122,7 @@ void GlobalSFM::triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Po
  * int l： 在滑动窗口中找到的与最新帧做5点法的帧的帧号
  * const Matrix3d relative_R： 从最新帧到第l帧的旋转（个人推断）
  * const Vector3d relative_T： 从最新帧到第l帧的位移（个人推断）
- * vector<SFMFeature> &sfm_f： shenmegui???
+ * vector<SFMFeature> &sfm_f： 用于视觉初始化的特征点数据
  * map<int, Vector3d> &sfm_tracked_points： shenmegui???
  */
 bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
@@ -132,7 +131,6 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 {
 	feature_num = sfm_f.size();
 	//cout << "set 0 and " << l << " as known " << endl;
-
 
 	// have relative_r relative_t
 	// intial two view
@@ -147,28 +145,29 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	T[l].setZero();
 
 	// 右乘形式，说明是从从local到global的旋转
+	// 滑动窗口中最新帧到第l（字母l，不是数字1）的旋转和位移
 	q[frame_num - 1] = q[l] * Quaterniond(relative_R);
 	T[frame_num - 1] = relative_T;
 	//cout << "init q_l " << q[l].w() << " " << q[l].vec().transpose() << endl;
 	//cout << "init t_l " << T[l].transpose() << endl;
 
 	//rotate to cam frame
-	// shenmegui??
 	Matrix3d c_Rotation[frame_num];
 	Vector3d c_Translation[frame_num];
 	Quaterniond c_Quat[frame_num];
-	
 	//for ceres
 	double c_rotation[frame_num][4];
 	double c_translation[frame_num][3];
 	Eigen::Matrix<double, 3, 4> Pose[frame_num];
 
+	// 第l帧
 	c_Quat[l] = q[l].inverse();
 	c_Rotation[l] = c_Quat[l].toRotationMatrix();
 	c_Translation[l] = -1 * (c_Rotation[l] * T[l]);
 	Pose[l].block<3, 3>(0, 0) = c_Rotation[l];
 	Pose[l].block<3, 1>(0, 3) = c_Translation[l];
 
+	// 滑动窗口中的最新帧
 	c_Quat[frame_num - 1] = q[frame_num - 1].inverse();
 	c_Rotation[frame_num - 1] = c_Quat[frame_num - 1].toRotationMatrix();
 	c_Translation[frame_num - 1] = -1 * (c_Rotation[frame_num - 1] * T[frame_num - 1]);
@@ -178,11 +177,13 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 
 	//1: trangulate between l ----- frame_num - 1
 	//2: solve pnp l + 1; trangulate l + 1 ------- frame_num - 1; 
+
 	//以frame_num - 1为参考帧，根据第l和frame_num - 1帧的R,T，三角化一些点，然后再用PNP得到l+1到frame-1之间所有相对pose，然后恢复这些3D点
 	
 	/** 
+	 * 根据第l和frame_num - 1帧的R,T，三角化一些点
 	 * 从第l帧到第（frame_num - 2）帧，以第frame_num - 1帧为参考帧：
-	 * 先通过pnp计算第i帧（i = l + 1, ..., frame_num - 2）的位姿，第l帧的姿态已知，所以直接在下一步进行三角化
+	 * 先通过pnp计算第i帧（i = l + 1, ..., frame_num - 2）的位姿
 	 * 再调用triangulateTwoFrames()三角化一些点
 	 */
 	for (int i = l; i < frame_num - 1 ; i++)
@@ -205,26 +206,10 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 		triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
 	}
 	//3: triangulate l-----l+1 l+2 ... frame_num -2
-	//以l为参考帧，继续恢复3D点
-
-	/** 
-	 * 从第l + 1帧到第（frame_num - 1）帧，以第l帧为参考帧：
-	 * 第i帧（i = l + 1, ..., frame_num - 2）的位姿前面已经计算过了
-	 * 再次调用triangulateTwoFrames()三角化一些点
-	 */
 	for (int i = l + 1; i < frame_num - 1; i++)
 		triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
-
-
 	//4: solve pnp l-1; triangulate l-1 ----- l
 	//             l-2              l-2 ----- l
-	//以l为参考帧，恢复0-l的pose和3D点
-
-	/** 
-	 * 从第l - 1帧到第0帧，以第l帧为参考帧：
-	 * 先通过pnp计算第i帧（i = l - 1, ..., 0）的位姿
-	 * 再调用triangulateTwoFrames()三角化一些点
-	 */
 	for (int i = l - 1; i >= 0; i--)
 	{
 		//solve pnp
@@ -237,14 +222,10 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 		c_Quat[i] = c_Rotation[i];
 		Pose[i].block<3, 3>(0, 0) = c_Rotation[i];
 		Pose[i].block<3, 1>(0, 3) = c_Translation[i];
-
 		//triangulate
 		triangulateTwoFrames(i, Pose[i], l, Pose[l], sfm_f);
 	}
-
-	
 	//5: triangulate all other points
-	//根据以上的点，恢复其他的点
 	for (int j = 0; j < feature_num; j++)
 	{
 		if (sfm_f[j].state == true)
@@ -279,7 +260,6 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 		cout << "solvePnP  t" << " i " << i <<"  " << t_tmp.x() <<"  "<< t_tmp.y() <<"  "<< t_tmp.z() << endl;
 	}
 */
-	//全局BA
 	//full BA
 	ceres::Problem problem;
 	ceres::LocalParameterization* local_parameterization = new ceres::QuaternionParameterization();

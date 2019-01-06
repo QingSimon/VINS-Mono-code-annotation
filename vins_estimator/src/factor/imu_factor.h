@@ -16,7 +16,6 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
     IMUFactor(IntegrationBase* _pre_integration):pre_integration(_pre_integration)
     {
     }
-    //IMU对应的残差，对应ceres的结构，需要自己计算jacobian
     virtual bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
 
@@ -59,8 +58,6 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 #endif
 
         Eigen::Map<Eigen::Matrix<double, 15, 1>> residual(residuals);
-
-        // 计算IMU观测残差
         residual = pre_integration->evaluate(Pi, Qi, Vi, Bai, Bgi,
                                             Pj, Qj, Vj, Baj, Bgj);
 
@@ -83,7 +80,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
             {
                 ROS_WARN("numerical unstable in preintegration");
                 //std::cout << pre_integration->jacobian << std::endl;
-///                ROS_BREAK(); 
+///                ROS_BREAK();
             }
 
             if (jacobians[0])
@@ -109,7 +106,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                 {
                     ROS_WARN("numerical unstable in preintegration");
                     //std::cout << sqrt_info << std::endl;
-                    ROS_BREAK();
+                    //ROS_BREAK();
                 }
             }
             if (jacobians[1])
@@ -123,8 +120,9 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 #if 0
             jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -dq_dbg;
 #else
-                Eigen::Quaterniond corrected_delta_q = pre_integration->delta_q * Utility::deltaQ(dq_dbg * (Bgi - pre_integration->linearized_bg));
-                jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -Utility::Qleft(Qj.inverse() * Qi * corrected_delta_q).bottomRightCorner<3, 3>() * dq_dbg;
+                //Eigen::Quaterniond corrected_delta_q = pre_integration->delta_q * Utility::deltaQ(dq_dbg * (Bgi - pre_integration->linearized_bg));
+                //jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -Utility::Qleft(Qj.inverse() * Qi * corrected_delta_q).bottomRightCorner<3, 3>() * dq_dbg;
+                jacobian_speedbias_i.block<3, 3>(O_R, O_BG - O_V) = -Utility::Qleft(Qj.inverse() * Qi * pre_integration->delta_q).bottomRightCorner<3, 3>() * dq_dbg;
 #endif
 
                 jacobian_speedbias_i.block<3, 3>(O_V, O_V - O_V) = -Qi.inverse().toRotationMatrix();
@@ -137,8 +135,8 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 
                 jacobian_speedbias_i = sqrt_info * jacobian_speedbias_i;
 
-                ROS_ASSERT(fabs(jacobian_speedbias_i.maxCoeff()) < 1e8);
-                ROS_ASSERT(fabs(jacobian_speedbias_i.minCoeff()) < 1e8);
+                //ROS_ASSERT(fabs(jacobian_speedbias_i.maxCoeff()) < 1e8);
+                //ROS_ASSERT(fabs(jacobian_speedbias_i.minCoeff()) < 1e8);
             }
             if (jacobians[2])
             {
@@ -156,8 +154,8 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 
                 jacobian_pose_j = sqrt_info * jacobian_pose_j;
 
-                ROS_ASSERT(fabs(jacobian_pose_j.maxCoeff()) < 1e8);
-                ROS_ASSERT(fabs(jacobian_pose_j.minCoeff()) < 1e8);
+                //ROS_ASSERT(fabs(jacobian_pose_j.maxCoeff()) < 1e8);
+                //ROS_ASSERT(fabs(jacobian_pose_j.minCoeff()) < 1e8);
             }
             if (jacobians[3])
             {
@@ -172,8 +170,8 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 
                 jacobian_speedbias_j = sqrt_info * jacobian_speedbias_j;
 
-                ROS_ASSERT(fabs(jacobian_speedbias_j.maxCoeff()) < 1e8);
-                ROS_ASSERT(fabs(jacobian_speedbias_j.minCoeff()) < 1e8);
+                //ROS_ASSERT(fabs(jacobian_speedbias_j.maxCoeff()) < 1e8);
+                //ROS_ASSERT(fabs(jacobian_speedbias_j.minCoeff()) < 1e8);
             }
         }
 

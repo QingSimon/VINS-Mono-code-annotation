@@ -206,6 +206,7 @@ bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vect
         return true;
 }
 
+// visual-inertial alignment：视觉SFM的结果与IMU预积分结果对齐
 bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs, Vector3d &g, VectorXd &x)
 {
     //估测陀螺仪的Bias，对应论文V-B-1

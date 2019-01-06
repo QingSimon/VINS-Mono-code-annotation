@@ -10,9 +10,6 @@ using namespace Eigen;
 
 #include <ros/console.h>
 
-/**
- * 5点法恢复相对位姿
- */
 class MotionEstimator
 {
   public:

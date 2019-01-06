@@ -6,14 +6,10 @@
 #include <ceres/ceres.h>
 using namespace Eigen;
 
-// IntegrationBase类用来封装IMU预积分相关的操作
 class IntegrationBase
 {
   public:
-    IntegrationBase() = delete; // 删除默认构造函数
-
-    // 自定义构造函数
-    // IntegrationBase对象初始化过程中，需要传入初始时刻加速度计和陀螺仪的测量值，以及偏置
+    IntegrationBase() = delete;
     IntegrationBase(const Eigen::Vector3d &_acc_0, const Eigen::Vector3d &_gyr_0,
                     const Eigen::Vector3d &_linearized_ba, const Eigen::Vector3d &_linearized_bg)
         : acc_0{_acc_0}, gyr_0{_gyr_0}, linearized_acc{_acc_0}, linearized_gyr{_gyr_0},
@@ -21,10 +17,7 @@ class IntegrationBase
             jacobian{Eigen::Matrix<double, 15, 15>::Identity()}, covariance{Eigen::Matrix<double, 15, 15>::Zero()},
           sum_dt{0.0}, delta_p{Eigen::Vector3d::Zero()}, delta_q{Eigen::Quaterniond::Identity()}, delta_v{Eigen::Vector3d::Zero()}
 
-    { 
-        // noise是IntegrationBase对象的成员变量
-        // noise对应着误差状态传播方程中噪声的协方差矩阵，也就是https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf 中公式（103）
-        // 里的Q矩阵，初始化时，噪声矩阵Q对应着https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf中的公式（111）
+    {
         noise = Eigen::Matrix<double, 18, 18>::Zero();
         noise.block<3, 3>(0, 0) =  (ACC_N * ACC_N) * Eigen::Matrix3d::Identity();
         noise.block<3, 3>(3, 3) =  (GYR_N * GYR_N) * Eigen::Matrix3d::Identity();
@@ -34,9 +27,6 @@ class IntegrationBase
         noise.block<3, 3>(15, 15) =  (GYR_W * GYR_W) * Eigen::Matrix3d::Identity();
     }
 
-    /** 
-     * 把IMU数据存入该段预积分的历史数据缓存vector中，并调用成员函数propagate进行积分传播 
-     */
     void push_back(double dt, const Eigen::Vector3d &acc, const Eigen::Vector3d &gyr)
     {
         dt_buf.push_back(dt);
@@ -45,47 +35,31 @@ class IntegrationBase
         propagate(dt, acc, gyr);
     }
 
-    //由于优化过程中Bias会更新，有时候需要根据新的bias重新计算预积分
-    // 参数列表中参数为，更新后的bias
     void repropagate(const Eigen::Vector3d &_linearized_ba, const Eigen::Vector3d &_linearized_bg)
     {
-        sum_dt = 0.0; // 该段预积分对应的总时间间隔清零
-
-        // 设置该段预积分初始时刻的IMU测量值
-        acc_0 = linearized_acc; 
+        sum_dt = 0.0;
+        acc_0 = linearized_acc;
         gyr_0 = linearized_gyr;
-
-        // 预积分值清零
         delta_p.setZero();
         delta_q.setIdentity();
         delta_v.setZero();
-
-        // 该段预积分对应的IMU偏置进行更新
         linearized_ba = _linearized_ba;
         linearized_bg = _linearized_bg;
-
-        // 
         jacobian.setIdentity();
         covariance.setZero();
         for (int i = 0; i < static_cast<int>(dt_buf.size()); i++)
             propagate(dt_buf[i], acc_buf[i], gyr_buf[i]);
     }
 
-    // 中值积分下，误差状态的预积分，其推导可参考https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf
-    // 中的2.3.2部分
     void midPointIntegration(double _dt, 
-                            const Eigen::Vector3d &_acc_0, const Eigen::Vector3d &_gyr_0, // 前一帧加速度计和陀螺仪的测量值
-                            const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1, // 后一帧加速度计和陀螺仪的测量值
+                            const Eigen::Vector3d &_acc_0, const Eigen::Vector3d &_gyr_0,
+                            const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1,
                             const Eigen::Vector3d &delta_p, const Eigen::Quaterniond &delta_q, const Eigen::Vector3d &delta_v,
                             const Eigen::Vector3d &linearized_ba, const Eigen::Vector3d &linearized_bg,
                             Eigen::Vector3d &result_delta_p, Eigen::Quaterniond &result_delta_q, Eigen::Vector3d &result_delta_v,
                             Eigen::Vector3d &result_linearized_ba, Eigen::Vector3d &result_linearized_bg, bool update_jacobian)
     {
         //ROS_INFO("midpoint integration");
-
-        // 计算标称状态下的预积分值，对应着https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf 中的
-        // 公式（70）、（71）、（72）、（73）、（74），其中result_delta_p、result_delta_v、result_delta_q、result_linearized_ba、result_linearized_bg对应着
-        // 公式中等式左边的项，delta_p、delta_v、delta_q、linearized_ba、linearized_bg对应着公式中等式右边的第一项
         Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba);
         Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
         result_delta_q = delta_q * Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2);
@@ -96,9 +70,6 @@ class IntegrationBase
         result_linearized_ba = linearized_ba;
         result_linearized_bg = linearized_bg;         
 
-
-
-        // 迭代更新误差状态预积分中的雅可比矩阵和协方差矩阵
         if(update_jacobian)
         {
             Vector3d w_x = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
@@ -106,8 +77,6 @@ class IntegrationBase
             Vector3d a_1_x = _acc_1 - linearized_ba;
             Matrix3d R_w_x, R_a_0_x, R_a_1_x;
 
-            // skew matrix
-            // 将三维向量扩展为叉乘反对称矩阵
             R_w_x<<0, -w_x(2), w_x(1),
                 w_x(2), 0, -w_x(0),
                 -w_x(1), w_x(0), 0;
@@ -117,8 +86,7 @@ class IntegrationBase
             R_a_1_x<<0, -a_1_x(2), a_1_x(1),
                 a_1_x(2), 0, -a_1_x(0),
                 -a_1_x(1), a_1_x(0), 0;
-    
-            // 此处的矩阵F对应https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf 中公式（103）中的系数矩阵F
+
             MatrixXd F = MatrixXd::Zero(15, 15);
             F.block<3, 3>(0, 0) = Matrix3d::Identity();
             F.block<3, 3>(0, 3) = -0.25 * delta_q.toRotationMatrix() * R_a_0_x * _dt * _dt + 
@@ -137,7 +105,6 @@ class IntegrationBase
             F.block<3, 3>(12, 12) = Matrix3d::Identity();
             //cout<<"A"<<endl<<A<<endl;
 
-            // 此处的矩阵V对应https://github.com/QingSimon/VINS-Mono-code-annotation/blob/master/VINS-Mono%E8%AF%A6%E8%A7%A3.pdf 中公式（103）中的矩阵V
             MatrixXd V = MatrixXd::Zero(15,18);
             V.block<3, 3>(0, 0) =  0.25 * delta_q.toRotationMatrix() * _dt * _dt;
             V.block<3, 3>(0, 3) =  0.25 * -result_delta_q.toRotationMatrix() * R_a_1_x  * _dt * _dt * 0.5 * _dt;
@@ -154,19 +121,17 @@ class IntegrationBase
 
             //step_jacobian = F;
             //step_V = V;
-            jacobian = F * jacobian; // 更新误差状态关于状态量的雅可比矩阵
-            covariance = F * covariance * F.transpose() + V * noise * V.transpose(); // 更新误差状态的协方差矩阵
+            jacobian = F * jacobian;
+            covariance = F * covariance * F.transpose() + V * noise * V.transpose();
         }
 
     }
 
-    //积分计算两个关键帧之间IMU测量的变化量： 旋转delta_q 速度delta_v 位移delta_p，加速度的biaslinearized_ba 陀螺仪的Bias linearized_bg
-    //同时维护更新预积分的Jacobian和Covariance,计算优化时必要的参数
     void propagate(double _dt, const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1)
     {
         dt = _dt;
-        acc_1 = _acc_1; // 将当前帧IMU数据中的加速度计测量值赋给IntegrationBase对象的成员变量acc_1
-        gyr_1 = _gyr_1; // 将当前帧IMU数据中的陀螺仪测量值赋给IntegrationBase对象的成员变量gyr_1
+        acc_1 = _acc_1;
+        gyr_1 = _gyr_1;
         Vector3d result_delta_p;
         Quaterniond result_delta_q;
         Vector3d result_delta_v;
@@ -192,7 +157,7 @@ class IntegrationBase
      
     }
 
-    // 调整bias后，根据一阶雅可比近似调整预积分值，然后计算IMU观测残差
+    // 计算IMU观测残差
     Eigen::Matrix<double, 15, 1> evaluate(const Eigen::Vector3d &Pi, const Eigen::Quaterniond &Qi, const Eigen::Vector3d &Vi, const Eigen::Vector3d &Bai, const Eigen::Vector3d &Bgi,
                                           const Eigen::Vector3d &Pj, const Eigen::Quaterniond &Qj, const Eigen::Vector3d &Vj, const Eigen::Vector3d &Baj, const Eigen::Vector3d &Bgj)
     {
@@ -221,27 +186,28 @@ class IntegrationBase
         return residuals;
     }
 
-    double dt;
+    // 中值积分需要使用前后两个时刻的IMU数据
+    double dt; // 前后两个时刻的时间间隔
     Eigen::Vector3d acc_0, gyr_0; // 前一帧IMU数据中的加速度计测量值和陀螺仪测量值
-    Eigen::Vector3d acc_1, gyr_1; // 后一帧（也可以说是，当前帧）IMU数据中的加速度计测量值和陀螺仪测量值
+    Eigen::Vector3d acc_1, gyr_1; // 后一帧IMU数据中的加速度计测量值和陀螺仪测量值
 
-    const Eigen::Vector3d linearized_acc, linearized_gyr; // 初始时刻的IMU测量值，作为常量一直保存
+    const Eigen::Vector3d linearized_acc, linearized_gyr; // 这一段预积分初始时刻的IMU测量值，作为常量一直保存，在IntegrationBase对象创建时指定
     Eigen::Vector3d linearized_ba, linearized_bg; // 这一段预积分对应的加速度计偏置和陀螺仪偏置
 
-    // jacobian: 当前状态关于预积分初始时刻状态量的雅可比矩阵
+    // jacobian: 当前误差状态量关于预积分初始时刻误差状态量的雅可比矩阵
     // covariance: 误差状态的协方差矩阵
     Eigen::Matrix<double, 15, 15> jacobian, covariance;
     Eigen::Matrix<double, 15, 15> step_jacobian; //似乎是用来调试程序的临时变量
     Eigen::Matrix<double, 15, 18> step_V; //似乎是用来调试程序的临时变量
     Eigen::Matrix<double, 18, 18> noise; // 误差状态传播方程中的噪声的协方差矩阵
 
-    double sum_dt;
+    double sum_dt; // 这一段预积分的总时间间隔
 
     // delta_p、delta_q和delta_v是标称状态的预积分
     // delta_p表示该段预积分初始时刻本体坐标系下，当前时刻本体坐标系的位置
     // delta_q表示该段预积分初始时刻本体坐标系下，当前时刻本体坐标系的旋转
     // delta_v表示该段预积分初始时刻本体坐标系下，当前时刻本体坐标系的速度
-    Eigen::Vector3d delta_p; 
+    Eigen::Vector3d delta_p;
     Eigen::Quaterniond delta_q;
     Eigen::Vector3d delta_v;
 
