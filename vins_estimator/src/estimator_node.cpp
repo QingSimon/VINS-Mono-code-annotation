@@ -356,7 +356,7 @@ void process()
             ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
             TicToc t_s;
             // 将图像特征点数据存到一个map容器中，key是特征点id
-            map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
+            map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image; // 为什么键值是一个vector啊，一个id的特征点对应一个vector，难道是因为可能有多个相机
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
                 int v = img_msg->channels[0].values[i] + 0.5; // ？？？这是什么操作

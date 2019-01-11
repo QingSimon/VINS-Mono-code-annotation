@@ -128,8 +128,8 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
 
     // 把当前帧图像（frame_count）的特征点添加到f_manager.feature容器中
     // 计算第2最新帧与第3最新帧之间的平均视差（当前帧是第1最新帧），然后判断是否把第2最新帧添加为关键帧
-    // 在未完成初始化时，是否添加关键帧的判定结果不起作用，因为在还未初始化时，滑动窗口要塞满，而且不需要做关键帧判别
-    // 只有在初始化完成之后，才需要滑动窗口，根据第2最新关键帧是否未关键帧选择相应的边缘化策略
+    // 在未完成初始化时，如果窗口没有塞满，那么是否添加关键帧的判定结果不起作用，滑动窗口要塞满
+    // 只有在滑动拆个纽扣塞满后，或者初始化完成之后，才需要滑动窗口，此时才需要做关键帧判别，根据第2最新关键帧是否未关键帧选择相应的边缘化策略
     if (f_manager.addFeatureCheckParallax(frame_count, image, td))
         marginalization_flag = MARGIN_OLD;
     else
@@ -143,7 +143,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
 
     ImageFrame imageframe(image, header.stamp.toSec());
     imageframe.pre_integration = tmp_pre_integration;
-    all_image_frame.insert(make_pair(header.stamp.toSec(), imageframe));
+    all_image_frame.insert(make_pair(header.stamp.toSec(), imageframe)); // 每读取一帧图像特征点数据，都会存入all_image_frame
     tmp_pre_integration = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
 
     // 相机与IMU外参的在线标定
@@ -170,7 +170,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
         if (frame_count == WINDOW_SIZE) // 滑动窗口中塞满了才进行初始化
         {
             bool result = false;
-            if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1)
+            if( ESTIMATE_EXTRINSIC != 2 && (header.stamp.toSec() - initial_timestamp) > 0.1) // 在上一次初始化失败后至少0.1秒才进行下一次初始化
             {
                result = initialStructure();
                initial_timestamp = header.stamp.toSec();
@@ -180,7 +180,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
                 solver_flag = NON_LINEAR;
                 solveOdometry(); // 紧耦合优化
                 slideWindow(); // 对窗口进行滑动
-                f_manager.removeFailures();
+                f_manager.removeFailures(); // 去除滑出了滑动窗口的特征点
                 ROS_INFO("Initialization finish!");
                 last_R = Rs[WINDOW_SIZE];
                 last_P = Ps[WINDOW_SIZE];
@@ -189,7 +189,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
                 
             }
             else
-                slideWindow(); // 对窗口进行滑动
+                slideWindow(); // 初始化不成功，对窗口进行滑动
         }
         else
             frame_count++; // 滑动窗口没塞满，接着塞
@@ -197,10 +197,10 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
     else // 已经成功初始化，进行正常的VIO紧耦合优化
     {
         TicToc t_solve;
-        solveOdometry();
+        solveOdometry(); // 紧耦合优化的入口函数
         ROS_DEBUG("solver costs: %fms", t_solve.toc());
 
-        // 失效检测，如果失效则重启系统
+        // 失效检测，如果失效则重启VINS系统
         if (failureDetection())
         {
             ROS_WARN("failure detection!");
@@ -320,7 +320,10 @@ bool Estimator::initialStructure()
     }
 
     //solve pnp for all frame
-    //4.对于非滑动窗口的所有帧，提供一个初始的R,T，然后solve pnp求解pose
+    // 由于并不是第一次视觉初始化就能成功，此时图像帧数目有可能会超过滑动窗口的大小
+    // 所以再视觉初始化的最后，要求出滑动窗口外的帧的位姿
+    // 最后把世界坐标系从帧l的相机坐标系，转到帧l的IMU坐标系
+    // 4.对于非滑动窗口的所有帧，提供一个初始的R,T，然后solve pnp求解pose
     map<double, ImageFrame>::iterator frame_it;
     map<int, Vector3d>::iterator it;
     frame_it = all_image_frame.begin( );
@@ -328,10 +331,11 @@ bool Estimator::initialStructure()
     {
         // provide initial guess
         cv::Mat r, rvec, t, D, tmp_r;
-        if((frame_it->first) == Headers[i].stamp.toSec())
+
+        if((frame_it->first) == Headers[i].stamp.toSec()) // all_image_frame与滑动窗口中对应的帧
         {
-            frame_it->second.is_key_frame = true;
-            frame_it->second.R = Q[i].toRotationMatrix() * RIC[0].transpose();
+            frame_it->second.is_key_frame = true; // 滑动窗口中所有帧都是关键帧
+            frame_it->second.R = Q[i].toRotationMatrix() * RIC[0].transpose(); // 根据各帧相机坐标系的姿态和外参，得到用各帧IMU坐标系的姿态（对应VINS Mono论文(2018年的期刊版论文)中的公式（6））。
             frame_it->second.T = T[i];
             i++;
             continue;
@@ -340,26 +344,32 @@ bool Estimator::initialStructure()
         {
             i++;
         }
+
+        // 为滑动窗口外的帧提供一个初始位姿
         Matrix3d R_inital = (Q[i].inverse()).toRotationMatrix();
         Vector3d P_inital = - R_inital * T[i];
         cv::eigen2cv(R_inital, tmp_r);
         cv::Rodrigues(tmp_r, rvec);
         cv::eigen2cv(P_inital, t);
 
-        frame_it->second.is_key_frame = false;
-        vector<cv::Point3f> pts_3_vector;
-        vector<cv::Point2f> pts_2_vector;
-        for (auto &id_pts : frame_it->second.points)
+        frame_it->second.is_key_frame = false; // 初始化时位于滑动窗口外的帧是非关键帧
+        vector<cv::Point3f> pts_3_vector; // 用于pnp解算的3D点
+        vector<cv::Point2f> pts_2_vector; // 用于pnp解算的2D点
+        for (auto &id_pts : frame_it->second.points) // 对于该帧中的特征点
         {
-            int feature_id = id_pts.first;
-            for (auto &i_p : id_pts.second)
+            int feature_id = id_pts.first; // 特征点id
+            for (auto &i_p : id_pts.second) // 由于可能有多个相机，所以需要遍历。i_p对应着一个相机所拍图像帧的特征点信息
             {
                 it = sfm_tracked_points.find(feature_id);
-                if(it != sfm_tracked_points.end())
+                // 如果it不是尾部迭代器，说明在sfm_tracked_points中找到了相应的3D点
+                if(it != sfm_tracked_points.end()) 
                 {
+                    // 记录该id特征点的3D位置
                     Vector3d world_pts = it->second;
                     cv::Point3f pts_3(world_pts(0), world_pts(1), world_pts(2));
                     pts_3_vector.push_back(pts_3);
+
+                    // 记录该id的特征点在该帧图像中的2D位置
                     Vector2d img_pts = i_p.second.head<2>();
                     cv::Point2f pts_2(img_pts(0), img_pts(1));
                     pts_2_vector.push_back(pts_2);
@@ -367,17 +377,19 @@ bool Estimator::initialStructure()
             }
         }
         cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);     
-        if(pts_3_vector.size() < 6)
+        if(pts_3_vector.size() < 6) // 如果匹配到的3D点数量少于6个，则认为初始化失败
         {
             cout << "pts_3_vector size " << pts_3_vector.size() << endl;
             ROS_DEBUG("Not enough points for solve pnp !");
             return false;
         }
-        if (! cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, 1))
+        if (! cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, 1)) // pnp求解失败
         {
             ROS_DEBUG("solve pnp fail!");
             return false;
         }
+
+        // pnp求解成功
         cv::Rodrigues(rvec, r);
         MatrixXd R_pnp,tmp_R_pnp;
         cv::cv2eigen(r, tmp_R_pnp);
@@ -385,8 +397,8 @@ bool Estimator::initialStructure()
         MatrixXd T_pnp;
         cv::cv2eigen(t, T_pnp);
         T_pnp = R_pnp * (-T_pnp);
-        frame_it->second.R = R_pnp * RIC[0].transpose();
-        frame_it->second.T = T_pnp;
+        frame_it->second.R = R_pnp * RIC[0].transpose(); // 根据各帧相机坐标系的姿态和外参，得到用各帧IMU坐标系的姿态。
+        frame_it->second.T = T_pnp; 
     }
 
     //camera与IMU对齐
@@ -463,7 +475,7 @@ bool Estimator::visualInitialAlign()
         it_per_id.estimated_depth *= s;
     }
 
-    Matrix3d R0 = Utility::g2R(g);
+    Matrix3d R0 = Utility::g2R(g); // 当前参考坐标系与世界坐标系（依靠g构建的坐标系）的旋转矩阵，暂时每搞清楚从谁转到谁？？？
     double yaw = Utility::R2ypr(R0 * Rs[0]).x();
     R0 = Utility::ypr2R(Eigen::Vector3d{-yaw, 0, 0}) * R0;
     g = R0 * g;
@@ -471,6 +483,8 @@ bool Estimator::visualInitialAlign()
     Matrix3d rot_diff = R0;
     for (int i = 0; i <= frame_count; i++)
     {
+        // 似乎是把Ps、Rs、Vs转到世界坐标系下
+        // ？？？但是为什么只转化了滑动窗口中的变量啊，all_image_frame中的非滑动窗口变量怎么办啊？？？不转换了吗？？？
         Ps[i] = rot_diff * Ps[i];
         Rs[i] = rot_diff * Rs[i];
         Vs[i] = rot_diff * Vs[i];

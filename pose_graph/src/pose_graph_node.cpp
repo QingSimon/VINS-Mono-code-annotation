@@ -464,7 +464,7 @@ int main(int argc, char **argv)
     n.getParam("skip_dis", SKIP_DIS);
     std::string config_file;
     n.getParam("config_file", config_file);
-    cv::FileStorage fsSettings(config_file, cv::FileStorage::READ);
+    cv::FileStorage fsSettings(config_file, cv::FileStorage::READ); // 读取参数配置文件
     if(!fsSettings.isOpened())
     {
         std::cerr << "ERROR: Wrong path to settings" << std::endl;
