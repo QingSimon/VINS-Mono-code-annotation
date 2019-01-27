@@ -73,7 +73,7 @@ void readParameters(ros::NodeHandle &n)
     ROS_INFO("ROW: %f COL: %f ", ROW, COL);
 
     ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];
-    if (ESTIMATE_EXTRINSIC == 2)
+    if (ESTIMATE_EXTRINSIC == 2) // 不知道相机外参
     {
         ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
         RIC.push_back(Eigen::Matrix3d::Identity());
@@ -81,14 +81,14 @@ void readParameters(ros::NodeHandle &n)
         EX_CALIB_RESULT_PATH = OUTPUT_PATH + "/extrinsic_parameter.csv";
 
     }
-    else 
+    else // 知道相机外参
     {
-        if ( ESTIMATE_EXTRINSIC == 1)
+        if ( ESTIMATE_EXTRINSIC == 1) // 虽然知道相机外参，但是在优化过程中还是去优化外参，这里的1只是标记了一种状态，并不是指优化的参数的数量
         {
             ROS_WARN(" Optimize extrinsic param around initial guess!");
             EX_CALIB_RESULT_PATH = OUTPUT_PATH + "/extrinsic_parameter.csv";
         }
-        if (ESTIMATE_EXTRINSIC == 0)
+        if (ESTIMATE_EXTRINSIC == 0) // 知道相机外参，而且在优化过程中该参数是固定的，不参与优化
             ROS_WARN(" fix extrinsic param ");
 
         cv::Mat cv_R, cv_T;

@@ -196,7 +196,7 @@ bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vect
         return false;
     }
 
-    RefineGravity(all_image_frame, g, x);
+    RefineGravity(all_image_frame, g, x); // 在正切空间微调重力向量
     s = (x.tail<1>())(0) / 100.0;
     (x.tail<1>())(0) = s;
     ROS_DEBUG_STREAM(" refine     " << g.norm() << " " << g.transpose());

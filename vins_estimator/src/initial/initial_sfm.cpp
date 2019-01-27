@@ -33,7 +33,7 @@ bool GlobalSFM::solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,
 		Vector2d point2d;
 		for (int k = 0; k < (int)sfm_f[j].observation.size(); k++) // 遍历观测到该特征点的图像帧
 		{
-			if (sfm_f[j].observation[k].first == i) // 从observation中找到待结算位姿的帧i
+			if (sfm_f[j].observation[k].first == i) // 从observation中找到待解算位姿的帧i
 			{
 				// 获取用于pnp解算的2D点
 				Vector2d img_pts = sfm_f[j].observation[k].second;

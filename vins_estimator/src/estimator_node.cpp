@@ -19,7 +19,7 @@ std::condition_variable con;
 double current_time = -1;
 queue<sensor_msgs::ImuConstPtr> imu_buf;
 queue<sensor_msgs::PointCloudConstPtr> feature_buf;
-queue<sensor_msgs::PointCloudConstPtr> relo_buf;
+queue<sensor_msgs::PointCloudConstPtr> relo_buf; // 订阅pose graph node发布的回环帧数据，存到relo_buf队列中，供重定位使用
 int sum_of_wait = 0;
 
 std::mutex m_buf; // 用于处理多个线程使用imu_buf和feature_buf的冲突
@@ -324,7 +324,7 @@ void process()
                 }
             }
 
-            // 重定位
+            // 设置重定位用的回环帧
             // set relocalization frame
             sensor_msgs::PointCloudConstPtr relo_msg = NULL;
             while (!relo_buf.empty())
@@ -335,7 +335,7 @@ void process()
             if (relo_msg != NULL)
             {
                 vector<Vector3d> match_points;
-                double frame_stamp = relo_msg->header.stamp.toSec();
+                double frame_stamp = relo_msg->header.stamp.toSec(); // 回环帧的时间戳
                 for (unsigned int i = 0; i < relo_msg->points.size(); i++)
                 {
                     Vector3d u_v_id;
@@ -349,7 +349,7 @@ void process()
                 Matrix3d relo_r = relo_q.toRotationMatrix();
                 int frame_index;
                 frame_index = relo_msg->channels[0].values[7];
-                estimator.setReloFrame(frame_stamp, frame_index, match_points, relo_t, relo_r);
+                estimator.setReloFrame(frame_stamp, frame_index, match_points, relo_t, relo_r); // 设置回环帧
             }
 
 
